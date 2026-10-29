@@ -1,18 +1,19 @@
 <?php
-$activity = [
-    ['Amelia Hart', 'Updated user role', 'Marcus Lee', '2 min ago', 'AH'],
-    ['Dr. Olivia Bennett', 'Viewed patient record', 'Eleanor Rigby', '18 min ago', 'OB'],
-    ['Sophia Clarke', 'Created appointment', 'Michael Torres', '32 min ago', 'SC'],
-    ['System', 'Room status updated', 'Room 204 · Occupied', '1 hr ago', 'SY'],
-];
+$auditSlice = array_slice($state['audit'] ?? audit_rows(), 0, 5);
+$totalUsers = count($state['users']);
+$activeDocs = count(array_filter($state['users'], static fn ($u) => $u[2] === 'Doctor' && $u[3] === 'Active'));
+$totalRooms = count($state['crud']['rooms']);
+$occRooms   = count(array_filter($state['crud']['rooms'], static fn ($r) => $r[2] === 'Occupied'));
+$occPct     = $totalRooms > 0 ? round(($occRooms / $totalRooms) * 100) . '%' : '0%';
+$totalPts   = count($state['patients'] ?? patients_data());
 ?>
-<?= page_title('Good morning, Amelia', 'Here’s what’s happening across the hospital today.') ?>
+<?= page_title('Good morning, ' . current_user_name('Admin'), 'Here’s what’s happening across the hospital today.') ?>
 
 <div class="stats-grid">
-    <?= stat_card('Total users', '248', '+12 this month', 'users') ?>
-    <?= stat_card('Active doctors', '42', '38 on duty today', 'patient', 'navy') ?>
-    <?= stat_card('Rooms occupied', '86%', '103 of 120 rooms', 'bed', 'amber') ?>
-    <?= stat_card('Patients today', '187', '+8.2% vs yesterday', 'clipboard', 'green') ?>
+    <?= stat_card('Total users', (string) $totalUsers, 'Staff accounts', 'users') ?>
+    <?= stat_card('Active doctors', (string) $activeDocs, 'On duty today', 'patient', 'navy') ?>
+    <?= stat_card('Rooms occupied', $occPct, $occRooms . ' of ' . $totalRooms . ' rooms', 'bed', 'amber') ?>
+    <?= stat_card('Registered patients', (string) $totalPts, count($state['admissions']) . ' currently admitted', 'clipboard', 'green') ?>
 </div>
 
 <div class="content-grid">
@@ -25,16 +26,23 @@ $activity = [
             <?= button('View all', ['variant' => 'ghost', 'href' => url(['page' => 'audit-logs'])]) ?>
         </div>
         <div class="activity-list">
-            <?php foreach ($activity as $a): ?>
+            <?php foreach ($auditSlice as $a): ?>
                 <div class="activity-row">
-                    <span class="mini-avatar"><?= e($a[4]) ?></span>
+                    <span class="mini-avatar"><?= e(initials($a[0])) ?></span>
                     <div>
                         <strong><?= e($a[0]) ?></strong>
-                        <p><?= e($a[1]) ?> · <b><?= e($a[2]) ?></b></p>
+                        <p><?= e($a[1]) ?> <?= e($a[2]) ?> · <b><?= e($a[3]) ?></b></p>
                     </div>
-                    <time><?= e($a[3]) ?></time>
+                    <time><?= e($a[4]) ?></time>
                 </div>
             <?php endforeach; ?>
+            <?php if (!$auditSlice): ?>
+                <div class="empty-state" style="padding:32px 20px;">
+                    <?= icon('history', 26) ?>
+                    <strong>No recent activity</strong>
+                    <p>System actions and record changes will appear here.</p>
+                </div>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -47,12 +55,12 @@ $activity = [
             <?= badge('All systems normal', 'success') ?>
         </div>
         <div class="health-ring">
-            <div><strong>99.98%</strong><span>Uptime</span></div>
+            <div><strong>100%</strong><span>Uptime</span></div>
         </div>
         <div class="health-rows">
-            <p><span>Database</span><?= badge('Operational', 'success') ?></p>
+            <p><span>Database</span><?= badge('Ready', 'success') ?></p>
             <p><span>Backup service</span><?= badge('Operational', 'success') ?></p>
-            <p><span>Last backup</span><strong>Today, 04:00</strong></p>
+            <p><span>Last backup</span><strong>—</strong></p>
         </div>
     </div>
 </div>

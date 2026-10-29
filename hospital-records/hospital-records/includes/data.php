@@ -11,7 +11,6 @@ function nav_for(string $role): array
             ['Roles', 'shield', 'roles'],
             ['Departments', 'building', 'departments'],
             ['Rooms', 'bed', 'rooms'],
-            ['Medications', 'pill', 'medications'],
             ['Archive', 'clipboard', 'archive'],
             ['Audit Logs', 'history', 'audit-logs'],
         ],
@@ -20,7 +19,23 @@ function nav_for(string $role): array
             ['Patients', 'patient', 'patients'],
             ['Appointments', 'calendar', 'appointments'],
             ['Admissions', 'clipboard', 'admissions'],
-            ['Billing', 'card', 'billing'],
+            ['Rooms', 'bed', 'staff-rooms'],
+        ],
+        'Cashier' => [
+            ['Dashboard', 'grid', 'dashboard'],
+            ['Unpaid Bills', 'card', 'unpaid-bills'],
+            ['Process Payment', 'clipboard', 'process-payment'],
+            ['Payment History', 'history', 'payment-history'],
+            ['Daily Report', 'printer', 'daily-report'],
+        ],
+        'Patient' => [
+            ['Home', 'grid', 'dashboard'],
+            ['Appointments', 'calendar', 'appointments'],
+            ['Find a Doctor', 'search', 'doctors'],
+            ['Medical History', 'history', 'history'],
+            ['Prescriptions', 'pill', 'prescriptions'],
+            ['Bills', 'card', 'bills'],
+            ['Profile', 'patient', 'profile'],
         ],
         default => [
             ['Dashboard', 'grid', 'dashboard'],
@@ -41,7 +56,6 @@ function routes_for(string $role): array
             'roles'       => 'pages/admin/roles.php',
             'departments' => 'pages/admin/crud.php',
             'rooms'       => 'pages/admin/crud.php',
-            'medications' => 'pages/admin/crud.php',
             'archive'     => 'pages/admin/archive.php',
             'audit-logs'  => 'pages/admin/audit.php',
         ],
@@ -50,7 +64,25 @@ function routes_for(string $role): array
             'patients'     => 'pages/shared/patients.php',
             'appointments' => 'pages/staff/appointments.php',
             'admissions'   => 'pages/staff/admissions.php',
-            'billing'      => 'pages/staff/billing.php',
+            'staff-rooms'  => 'pages/staff/rooms.php',
+            'book'         => 'pages/shared/book.php',
+        ],
+        'Cashier' => [
+            'dashboard'       => 'pages/cashier/dashboard.php',
+            'unpaid-bills'    => 'pages/cashier/unpaid_bills.php',
+            'process-payment' => 'pages/cashier/process_payment.php',
+            'payment-history' => 'pages/cashier/payment_history.php',
+            'daily-report'    => 'pages/cashier/daily_report.php',
+        ],
+        'Patient' => [
+            'dashboard'     => 'pages/patient/home.php',
+            'appointments'  => 'pages/patient/appointments.php',
+            'doctors'       => 'pages/patient/doctors.php',
+            'book'          => 'pages/shared/book.php',
+            'history'       => 'pages/patient/history.php',
+            'prescriptions' => 'pages/patient/prescriptions.php',
+            'bills'         => 'pages/patient/bills.php',
+            'profile'       => 'pages/patient/profile.php',
         ],
         default => [
             'dashboard'       => 'pages/doctor/dashboard.php',
@@ -65,11 +97,17 @@ function routes_for(string $role): array
 function details_for(string $role): array
 {
     return match ($role) {
-        'Staff'  => ['profile' => 'pages/staff/patient_profile.php', 'bill' => 'pages/staff/bill_detail.php'],
-        'Doctor' => [
+        'Staff'   => ['profile' => 'pages/staff/patient_profile.php'],
+        'Cashier' => [
+            'receipt' => 'pages/cashier/receipt.php',
+        ],
+        'Doctor'  => [
             'history'    => 'pages/doctor/patient_history.php',
             'new-record' => 'pages/doctor/new_record.php',
             'lab'        => 'pages/doctor/lab_detail.php',
+        ],
+        'Patient' => [
+            'bill' => 'pages/patient/bill_detail.php',
         ],
         default => [],
     };
@@ -77,120 +115,147 @@ function details_for(string $role): array
 
 function current_user_name(string $role): string
 {
-    return ['Admin' => 'Amelia Hart', 'Staff' => 'Maya Chen', 'Doctor' => 'Dr. James Wilson'][$role] ?? 'User';
+    if (!empty($_SESSION['user_name']) && ($_SESSION['role'] ?? '') === $role) {
+        return (string) $_SESSION['user_name'];
+    }
+    if ($role === 'Patient' && !empty($_SESSION['state']['patients'][0][0])) {
+        return (string) $_SESSION['state']['patients'][0][0];
+    }
+    if ($role === 'Doctor') {
+        foreach ($_SESSION['state']['users'] ?? [] as $u) {
+            if (($u[2] ?? '') === 'Doctor' && ($u[3] ?? '') === 'Active') {
+                return str_starts_with($u[0], 'Dr.') ? $u[0] : 'Dr. ' . $u[0];
+            }
+        }
+    }
+    return ['Admin' => 'Administrator', 'Staff' => 'Front Desk', 'Cashier' => 'Hospital Cashier', 'Doctor' => 'Doctor', 'Patient' => 'Patient'][$role] ?? 'User';
 }
 
 function current_user_title(string $role): string
 {
-    return ['Admin' => 'System administrator', 'Staff' => 'Front desk staff', 'Doctor' => 'Cardiologist'][$role] ?? '';
+    $base = ['Admin' => 'System administrator', 'Staff' => 'Front desk staff', 'Cashier' => 'Billing & cashier desk', 'Doctor' => 'Attending physician', 'Patient' => 'Patient portal'][$role] ?? '';
+    $uid  = $_SESSION['user_id'] ?? '';
+    return $uid !== '' ? $base . ' · ' . $uid : $base;
+}
+
+/** Hospital doctor directory: [name, department, specialty, years of experience, availability] */
+function doctors_data(): array
+{
+    $docs = [];
+    foreach ($_SESSION['state']['users'] ?? [] as $u) {
+        if (($u[2] ?? '') === 'Doctor' && ($u[3] ?? '') === 'Active') {
+            $name = str_starts_with($u[0], 'Dr.') ? $u[0] : 'Dr. ' . $u[0];
+            $dept = !empty($u[5]) ? $u[5] : 'General Medicine';
+            $spec = !empty($u[6]) ? $u[6] : 'General Practice';
+            $docs[] = [$name, $dept, $spec, 1, 'Mon – Fri'];
+        }
+    }
+    return $docs;
 }
 
 function seed_users(): array
 {
-    return [
-        ['Olivia Bennett', 'olivia.b@medicore.com', 'Doctor', 'Active', 'Today, 09:42'],
-        ['Marcus Lee', 'marcus.l@medicore.com', 'Nurse', 'Active', 'Today, 08:15'],
-        ['Sophia Clarke', 'sophia.c@medicore.com', 'Front desk', 'Active', 'Yesterday, 17:32'],
-        ['Noah Williams', 'noah.w@medicore.com', 'Doctor', 'Disabled', 'Mar 12, 2025'],
-        ['Emma Davis', 'emma.d@medicore.com', 'Billing', 'Active', 'Mar 19, 2025'],
-    ];
+    return [];
 }
 
 function patients_data(): array
 {
-    return [
-        ['Eleanor Rigby', 'Apr 18, 1982', '(415) 555-0192', 'HIN-884-120', 'ER'],
-        ['Michael Torres', 'Sep 03, 1974', '(415) 555-0138', 'HIN-293-771', 'MT'],
-        ['Ava Thompson', 'Jan 22, 1991', '(415) 555-0145', 'HIN-551-092', 'AT'],
-        ['Henry Adams', 'Jun 11, 1968', '(415) 555-0166', 'HIN-008-431', 'HA'],
-        ['Nora Patel', 'Dec 08, 1987', '(415) 555-0114', 'HIN-714-903', 'NP'],
-    ];
+    return [];
 }
 
 function archive_records(): array
 {
+    return [];
+}
+
+/** [user, action, table, record id, date & time, user role] */
+function audit_rows(): array
+{
+    return [];
+}
+
+/** All assignable permissions. */
+function permissions_list(): array
+{
     return [
-        ['#ARC-5812', 'Eleanor Rigby', 'Medical record', 'Mar 20, 2025', 'Amelia Hart'],
-        ['#ARC-5809', 'Michael Torres', 'Billing', 'Mar 20, 2025', 'Emma Davis'],
-        ['#ARC-5788', 'Ava Thompson', 'Appointment', 'Mar 18, 2025', 'Sophia Clarke'],
-        ['#ARC-5664', 'Henry Adams', 'Admission', 'Feb 26, 2025', 'Marcus Lee'],
-        ['#ARC-5490', 'Nora Patel', 'Lab result', 'Jan 14, 2025', 'Olivia Bennett'],
-        ['#ARC-4881', 'Daniel Kim', 'Medical record', 'Nov 08, 2024', 'Amelia Hart'],
+        'View patients', 'Edit patients', 'View medical records', 'Edit medical records',
+        'Manage appointments', 'Manage admissions', 'Manage billing', 'View lab results',
+        'Manage users', 'Manage roles', 'View audit logs', 'Manage archive',
     ];
 }
 
-function audit_rows(): array
+/** [name, description, user count, permissions[], icon] — Administrator excluded (only 1 system admin). */
+function seed_roles(): array
+{
+    $all = permissions_list();
+    return [
+        ['Doctor', 'Clinical records and appointments', 0, array_slice($all, 0, 8), 'patient'],
+        ['Staff', 'Registration, scheduling, and admissions', 0, ['View patients', 'Edit patients', 'Manage appointments', 'Manage admissions'], 'users'],
+        ['Cashier', 'Billing, payment collection, official receipts, and daily reports', 0, ['View patients', 'Manage billing'], 'card'],
+        ['Patient', 'Patient portal access for appointments, records, and billing', 0, ['View medical records', 'Manage appointments', 'View lab results'], 'patient'],
+    ];
+}
+
+/** role => [[title, text, time, read]] */
+function seed_notifications(): array
 {
     return [
-        ['Amelia Hart', 'Updated', 'users', '#USR-1042', 'Mar 20, 2025 · 09:42'],
-        ['Olivia Bennett', 'Viewed', 'medical_records', '#REC-8841', 'Mar 20, 2025 · 09:18'],
-        ['Sophia Clarke', 'Created', 'appointments', '#APT-3281', 'Mar 20, 2025 · 08:56'],
-        ['Marcus Lee', 'Updated', 'admissions', '#ADM-0912', 'Mar 20, 2025 · 08:41'],
-        ['Amelia Hart', 'Disabled', 'users', '#USR-0937', 'Mar 19, 2025 · 17:12'],
+        'Admin'   => [],
+        'Staff'   => [],
+        'Cashier' => [],
+        'Doctor'  => [],
+        'Patient' => [],
     ];
 }
 
 function seed_crud(): array
 {
     return [
-        'departments' => [
-            ['Cardiology', 'Dr. Olivia Bennett', '18', '2nd Floor'],
-            ['Neurology', 'Dr. Ethan Ross', '12', '3rd Floor'],
-            ['Pediatrics', 'Dr. Mia Morgan', '15', '1st Floor'],
-            ['Orthopedics', 'Dr. Liam Scott', '11', 'West Wing'],
-        ],
-        'rooms' => [
-            ['Room 201', 'General Ward', 'Occupied', 'Eleanor Rigby'],
-            ['Room 202', 'General Ward', 'Available', '—'],
-            ['Room 204', 'Cardiology', 'Occupied', 'Michael Torres'],
-            ['Room 301', 'ICU', 'Cleaning', '—'],
-        ],
-        'medications' => [
-            ['Amoxicillin', 'Antibiotic', '500 mg', '412 units'],
-            ['Atorvastatin', 'Cardiovascular', '20 mg', '286 units'],
-            ['Metformin', 'Diabetes', '850 mg', '328 units'],
-            ['Lisinopril', 'Cardiovascular', '10 mg', '94 units'],
-        ],
+        'departments' => [],
+        'rooms'       => [],
+        'medications' => [],
     ];
 }
 
 function seed_admissions(): array
 {
-    return [
-        ['Michael Torres', 'Room 204', 'Cardiology', 'Mar 18, 2025', 'Dr. Bennett'],
-        ['Henry Adams', 'Room 318', 'Orthopedics', 'Mar 17, 2025', 'Dr. Scott'],
-        ['Lily Morgan', 'Room 112', 'Pediatrics', 'Mar 19, 2025', 'Dr. Morgan'],
-        ['Daniel Kim', 'Room 302', 'ICU', 'Mar 16, 2025', 'Dr. Ross'],
-    ];
+    return [];
+}
+
+/** Formatted date N days before today (sample data stays current). */
+function days_ago(int $n): string
+{
+    return date('M d, Y', strtotime('-' . $n . ' days'));
+}
+
+/** [patient, room, ward, discharged date, proof image path|null, timestamp] */
+function seed_discharges(): array
+{
+    return [];
 }
 
 function bills_data(): array
 {
-    return [
-        ['Eleanor Rigby', '$240.00', 'Paid', 'Mar 20, 2025'],
-        ['Michael Torres', '$1,280.00', 'Unpaid', 'Mar 18, 2025'],
-        ['Ava Thompson', '$180.00', 'Pending', 'Mar 18, 2025'],
-        ['Henry Adams', '$3,420.00', 'Unpaid', 'Mar 17, 2025'],
-    ];
+    return [];
 }
 
+/** [time, patient, visit_type, status, complaint, doctor, department, date] */
 function doctor_visits(): array
 {
-    return [
-        ['08:30', 'Eleanor Rigby', 'Follow-up', 'Completed'],
-        ['10:00', 'Michael Torres', 'Consultation', 'In progress'],
-        ['11:30', 'Ava Thompson', 'Follow-up', 'Waiting'],
-        ['14:00', 'Nora Patel', 'New patient', 'Confirmed'],
-        ['15:30', 'Henry Adams', 'Post-op review', 'Confirmed'],
-    ];
+    return [];
 }
 
-function lab_rows(): array
+/** Mutable version of doctor_visits() stored in session. */
+function seed_appointments(): array { return doctor_visits(); }
+
+function seed_lab_results(): array
 {
-    return [
-        ['CBC-8421', 'Eleanor Rigby', 'Complete blood count', 'Done', 'Mar 20, 2025'],
-        ['LIP-2938', 'Michael Torres', 'Lipid panel', 'Pending', 'Mar 20, 2025'],
-        ['MET-7712', 'Ava Thompson', 'Metabolic panel', 'Done', 'Mar 19, 2025'],
-        ['THY-0084', 'Nora Patel', 'Thyroid function', 'Pending', 'Mar 19, 2025'],
-    ];
+    return [];
+}
+
+function lab_rows(): array { return seed_lab_results(); }
+
+function seed_medical_records(): array
+{
+    return [];
 }

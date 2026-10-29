@@ -44,7 +44,10 @@ function post_button(string $label, string $action, array $fields = [], array $o
         $btn = '<button type="submit" class="btn btn-' . e($opts['variant'] ?? 'primary') . ' ' . e($class) . '">'
             . (isset($opts['icon']) ? icon($opts['icon'], 17) : '') . '<span>' . e($label) . '</span></button>';
     }
-    return '<form method="post" action="index.php" class="inline-form">' . $hidden . $btn . '</form>';
+    $confirmAttr = (($opts['confirm'] ?? true) !== false && $action !== 'read_notifications')
+        ? ' onsubmit="return confirm(\'Are you sure about this action?\');"'
+        : '';
+    return '<form method="post" action="index.php" class="inline-form"' . $confirmAttr . '>' . $hidden . $btn . '</form>';
 }
 
 /** Button that only shows a confirmation toast (matches the prototype's demo-only buttons). */
@@ -59,6 +62,22 @@ function field(string $label, string $name, string $placeholder = '', string $ty
         . '<input type="' . e($type) . '" name="' . e($name) . '" placeholder="' . e($placeholder) . '" value="' . e($value) . '">'
         . '</span></label>';
 }
+
+/** Image file input (JPG/PNG/GIF/WEBP). Camera capture is offered on mobile. */
+function file_field(string $label, string $name): string
+{
+    return '<label class="field"><span class="field-label">' . e($label) . '</span><span class="input-wrap">'
+        . '<input type="file" class="file-input" name="' . e($name) . '" accept="image/jpeg,image/png,image/gif,image/webp" required>'
+        . '</span><small class="field-hint">JPG, PNG, GIF or WEBP · max 5 MB</small></label>';
+}
+
+/** Thumbnail link to a stored proof image. */
+function proof_thumb(string $path, string $alt): string
+{
+    return '<a class="proof-thumb" href="' . e($path) . '" target="_blank" rel="noopener">'
+        . '<img src="' . e($path) . '" alt="' . e($alt) . '"><span>View</span></a>';
+}
+
 
 function select_field(string $label, string $name, array $options, string $selected = ''): string
 {
@@ -111,8 +130,8 @@ function mini_avatar(string $name): string
 function status_tone(string $status): string
 {
     return match ($status) {
-        'Paid', 'Completed', 'Done', 'Active', 'Checked in', 'Available' => 'success',
-        'Pending', 'Waiting', 'Cleaning' => 'warning',
+        'Paid', 'Completed', 'Done', 'Active', 'Checked in', 'Available', 'Cash' => 'success',
+        'Pending', 'Waiting', 'Partial', 'Insurance' => 'warning',
         'Unpaid', 'Disabled', 'Cancelled' => 'danger',
         'Disabled-neutral' => 'neutral',
         default => 'info',
@@ -191,4 +210,48 @@ function tabs(array $labels, string $active, string $param = 'tab'): string
         $html .= '<a class="' . ($label === $active ? 'active' : '') . '" href="' . e(url_with([$param => $label])) . '">' . e($label) . '</a>';
     }
     return $html . '</div>';
+}
+
+/* ------------------------- date range filter ------------------------- */
+
+/** Validated [from, to] (Y-m-d or '') from ?from= / ?to=, swapped if reversed. */
+function range_params(): array
+{
+    $clean = static fn ($v) => (is_string($v) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $v) && strtotime($v) !== false) ? $v : '';
+    $from = $clean($_GET['from'] ?? '');
+    $to   = $clean($_GET['to'] ?? '');
+    if ($from !== '' && $to !== '' && $from > $to) {
+        [$from, $to] = [$to, $from];
+    }
+    return [$from, $to];
+}
+
+/** Is a date (string or timestamp) inside the inclusive range? Empty bound = open-ended. */
+function in_range(string|int $date, string $from, string $to): bool
+{
+    if ($from === '' && $to === '') {
+        return true;
+    }
+    $ts = is_int($date) ? $date : strtotime($date);
+    if ($ts === false) {
+        return false;
+    }
+    $day = date('Y-m-d', $ts);
+    return ($from === '' || $day >= $from) && ($to === '' || $day <= $to);
+}
+
+/** From/To date range inputs — no label wrappers, flush 42px height to match toolbar controls. */
+function date_range_fields(string $from, string $to): string
+{
+    $fAttr = ' value="' . e($from) . '"' . ($to   !== '' ? ' max="' . e($to)   . '"' : '');
+    $tAttr = ' value="' . e($to)   . '"' . ($from !== '' ? ' min="' . e($from) . '"' : '');
+    $clear = ($from !== '' || $to !== '')
+        ? '<a class="range-clear" href="' . e(url_with(['from' => null, 'to' => null, 'p' => null])) . '">&times;&nbsp;Clear</a>'
+        : '';
+    return '<div class="range-filter">'
+        . '<input type="date" name="from" aria-label="From date"' . $fAttr . '>'
+        . '<span class="range-sep">&ndash;</span>'
+        . '<input type="date" name="to" aria-label="To date"' . $tAttr . '>'
+        . $clear
+        . '</div>';
 }

@@ -1,45 +1,38 @@
 <?php
-$period = in_array($_GET['period'] ?? '', ['Daily', 'Monthly', 'Yearly'], true) ? $_GET['period'] : 'Daily';
+[$from, $to] = range_params();
 $q      = trim((string) ($_GET['q'] ?? ''));
 $type_  = (string) ($_GET['type'] ?? 'All record types');
-$limit  = ['Daily' => 2, 'Monthly' => 4, 'Yearly' => 6][$period];
 
+$archiveSource = $state['archive'] ?? archive_records();
 $records = array_values(array_filter(
-    array_slice(archive_records(), 0, $limit),
-    static fn ($r) => ($type_ === 'All record types' || $r[2] === $type_) && row_matches($r, $q)
+    $archiveSource,
+    static fn ($r) => ($type_ === 'All record types' || $r[2] === $type_)
+        && in_range($r[3], $from, $to)
+        && row_matches($r, $q)
 ));
 
-$counts  = ['Daily' => '24', 'Monthly' => '684', 'Yearly' => '7,248'];
-$storage = ['Daily' => '1.8 GB', 'Monthly' => '38 GB', 'Yearly' => '412 GB'];
-
-$toolbar = toolbar_open('archive', ['period' => $period])
+$toolbar = toolbar_open('archive')
     . search_box('Search archived records...', 'q', $q)
     . '<div class="toolbar-right">'
-    . select_field('', 'type', ['All record types', 'Medical record', 'Billing', 'Appointment', 'Admission', 'Lab result'], $type_)
-    . field('', 'date', '', 'date', (string) ($_GET['date'] ?? ''))
+    . date_range_fields($from, $to)
+    . select_field('', 'type', ['All record types', 'User account', 'Department', 'Room', 'Role', 'Medical record', 'Billing', 'Appointment', 'Admission', 'Lab result'], $type_)
     . filter_button()
     . '</div>'
     . toolbar_close();
 ?>
 <?= page_title(
     'Archive',
-    'Find and manage archived hospital records by reporting period.',
-    button('Export archive', ['variant' => 'secondary', 'href' => url(['page' => 'archive', 'period' => $period, 'export' => 1])])
+    'Find and restore archived users, departments, rooms, roles, and hospital records.',
+    button('Export archive', ['variant' => 'secondary', 'href' => url(['page' => 'archive', 'export' => 1, 'from' => $from, 'to' => $to])])
 ) ?>
 
 <div class="archive-summary">
-    <div><span>Archived records</span><strong><?= e($counts[$period]) ?></strong><small>In the selected <?= e(strtolower($period)) ?> view</small></div>
-    <div><span>Storage used</span><strong><?= e($storage[$period]) ?></strong><small>Encrypted secure storage</small></div>
+    <div><span>Matching records</span><strong><?= e((string) count($records)) ?></strong><small>In selected date range</small></div>
+    <div><span>Storage used</span><strong><?= count($archiveSource) > 0 ? (count($archiveSource) * 2) . ' MB' : '0 MB' ?></strong><small>Encrypted secure storage</small></div>
     <div><span>Retention</span><strong>7 years</strong><small>Policy compliant</small></div>
 </div>
 
-<div class="period-switch" aria-label="Archive period">
-    <?php foreach (['Daily', 'Monthly', 'Yearly'] as $item): ?>
-        <a class="<?= $period === $item ? 'active' : '' ?>" href="<?= e(url(['page' => 'archive', 'period' => $item])) ?>"><?= e($item) ?></a>
-    <?php endforeach; ?>
-</div>
-
-<?= table_open(['Archive ID', 'Patient', 'Record type', 'Archived', 'Archived by', 'Actions'], $toolbar) ?>
+<?= table_open(['Archive ID', 'Record / Subject', 'Record type', 'Archived', 'Archived by', 'Actions'], $toolbar) ?>
 <?php foreach ($records as $r): ?>
     <tr>
         <td><code><?= e($r[0]) ?></code></td>
@@ -47,10 +40,10 @@ $toolbar = toolbar_open('archive', ['period' => $period])
         <td><?= badge($r[2], 'neutral') ?></td>
         <td><?= e($r[3]) ?></td>
         <td><?= e($r[4]) ?></td>
-        <td><?= notify_button('', $r[0] . ' restored to active records', ['plain' => true, 'class' => 'text-link', 'html' => 'Restore']) ?></td>
+        <td><?= post_button('', 'restore_archive', ['key' => $r[0]], ['plain' => true, 'class' => 'text-link', 'html' => 'Restore']) ?></td>
     </tr>
 <?php endforeach; ?>
-<?= table_close('1–' . count($records) . ' of ' . count($records), false) ?>
+<?= table_close(count($records) . ' of ' . count($archiveSource) . ' records', false) ?>
 
 <?php if (!$records): ?>
     <?= filtered_empty('No archived records match these filters.') ?>

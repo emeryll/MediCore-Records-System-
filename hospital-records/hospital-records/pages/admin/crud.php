@@ -8,7 +8,7 @@ $q        = trim((string) ($_GET['q'] ?? ''));
 $records = array_values(array_filter($state['crud'][$type] ?? [], static fn ($r) => row_matches($r, $q)));
 
 $headings = match ($type) {
-    'departments' => ['Department', 'Head', 'Staff', 'Location', 'Actions'],
+    'departments' => ['Department', 'Head', 'Location', 'Actions'],
     'rooms'       => ['Room', 'Ward', 'Status', 'Patient', 'Actions'],
     default       => ['Medication', 'Category', 'Strength', 'Stock', 'Actions'],
 };
@@ -22,14 +22,16 @@ $toolbar = toolbar_open($type) . search_box('Search ' . $type . '...', 'q', $q) 
 ) ?>
 
 <?= table_open($headings, $toolbar) ?>
-<?php foreach ($records as $r): ?>
+<?php foreach ($records as $r):
+    $cells = ($type === 'departments' && count($r) === 4) ? [$r[0], $r[1], $r[3]] : $r;
+?>
     <tr>
-        <?php foreach ($r as $i => $cell): ?>
+        <?php foreach ($cells as $i => $cell): ?>
             <td>
                 <?php if ($i === 0): ?>
                     <strong><?= e($cell) ?></strong>
                 <?php elseif ($type === 'rooms' && $i === 2): ?>
-                    <?= badge($cell, $cell === 'Available' ? 'success' : ($cell === 'Cleaning' ? 'warning' : 'info')) ?>
+                    <?= badge($cell, $cell === 'Available' ? 'success' : 'info') ?>
                 <?php else: ?>
                     <?= e($cell) ?>
                 <?php endif; ?>
@@ -37,7 +39,7 @@ $toolbar = toolbar_open($type) . search_box('Search ' . $type . '...', 'q', $q) 
         <?php endforeach; ?>
         <td>
             <div class="row-actions">
-                <a href="<?= e(url(['page' => $type, 'modal' => 'Edit ' . $singular])) ?>"><?= icon('edit', 15) ?> Edit</a>
+                <a href="<?= e(url(array_merge(['page' => $type, 'modal' => 'Edit ' . $singular, 'key' => $r[0]], $type === 'rooms' ? ['room' => $r[0]] : []))) ?>"><?= icon('edit', 15) ?> Edit</a>
                 <?= post_button('', 'delete_crud', ['type' => $type, 'key' => $r[0]], [
                     'plain' => true, 'class' => 'danger-link', 'html' => 'Delete',
                 ]) ?>
@@ -45,7 +47,7 @@ $toolbar = toolbar_open($type) . search_box('Search ' . $type . '...', 'q', $q) 
         </td>
     </tr>
 <?php endforeach; ?>
-<?= table_close('1–4 of 12') ?>
+<?= table_close(count($records) . ' of ' . count($state['crud'][$type] ?? []), false) ?>
 
 <?php if (!$records): ?>
     <?= filtered_empty('No ' . $type . ' match this search.') ?>

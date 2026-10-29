@@ -1,13 +1,12 @@
 <?php
-/** @var ?string $loginError  'wrong' | 'disabled' | null */
+/** @var ?string $loginError  'wrong' | 'disabled' | 'invalid_id' | null */
 $loginError = $_SESSION['login_error'] ?? null;
-$resetSent  = !empty($_SESSION['reset_sent']);
+$resetSent  = !empty($_SESSION['reset_sent']) || !empty($_GET['forgot']);
 unset($_SESSION['login_error'], $_SESSION['reset_sent']);
 
-$demo     = $_GET['demo'] ?? '';
-$username = in_array($demo, ['admin', 'staff', 'doctor'], true) ? $demo : (string) ($_SESSION['login_username'] ?? '');
-$password = $username !== '' && $demo !== '' ? 'demo' : '';
-unset($_SESSION['login_username']);
+$userId   = (string) ($_SESSION['login_user_id'] ?? ($_GET['id'] ?? ''));
+$username = (string) ($_SESSION['login_username'] ?? '');
+unset($_SESSION['login_user_id'], $_SESSION['login_username']);
 ?>
 <!doctype html>
 <html lang="en">
@@ -16,7 +15,7 @@ unset($_SESSION['login_username']);
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sign in · <?= e(APP_NAME) ?> Hospital Records System</title>
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="assets/css/style.css">
+    <link rel="stylesheet" href="assets/css/style.css?v=<?= filemtime(__DIR__ . '/../assets/css/style.css') ?>">
 </head>
 <body>
 <main class="login-page">
@@ -44,7 +43,7 @@ unset($_SESSION['login_username']);
         <div class="visual-copy">
             <p class="eyebrow">Care, connected</p>
             <h1>Clear records.<br>Confident care.</h1>
-            <p>One secure place for your team to coordinate better outcomes for every patient.</p>
+            <p>Sign in with your assigned MediCore ID to access your role workspace or patient portal.</p>
         </div>
         <div class="trust-row">
             <span><?= icon('shield', 16) ?> HIPAA compliant</span>
@@ -55,19 +54,26 @@ unset($_SESSION['login_username']);
 
     <section class="login-form-side">
         <div class="login-card">
+            <a class="back-link" href="index.php" style="margin-bottom:14px;">← Back to home</a>
             <div class="mobile-login-logo"><?= logo() ?></div>
             <p class="eyebrow">Welcome back</p>
-            <h2>Hospital Records System</h2>
-            <p class="login-intro">Sign in to access your secure workspace.</p>
+            <h2>Sign in to MediCore</h2>
+            <p class="login-intro">Enter your assigned ID, username, and password to continue.</p>
 
             <?php if ($loginError): ?>
-                <div class="login-alert <?= e($loginError) ?>">
+                <div class="login-alert <?= e($loginError === 'disabled' ? 'disabled' : 'wrong') ?>">
                     <?= icon($loginError === 'disabled' ? 'lock' : 'shield') ?>
                     <div>
-                        <strong><?= $loginError === 'disabled' ? 'Account disabled' : 'Incorrect credentials' ?></strong>
-                        <p><?= $loginError === 'disabled'
-                            ? 'Your account has been disabled. Contact your administrator for assistance.'
-                            : 'The username or password you entered is incorrect. Please try again.' ?></p>
+                        <strong><?= match ($loginError) {
+                            'disabled'   => 'Account disabled',
+                            'invalid_id' => 'Invalid User ID format',
+                            default      => 'Incorrect credentials',
+                        } ?></strong>
+                        <p><?= match ($loginError) {
+                            'disabled'   => 'Your account has been disabled. Contact your administrator for assistance.',
+                            'invalid_id' => 'Please enter a valid ID starting with P (Patient), S (Staff), D (Doctor), or A (Admin) — for example P-1001.',
+                            default      => 'No matching account found or password is incorrect. Please check your ID, username, and password.',
+                        } ?></p>
                     </div>
                 </div>
             <?php endif; ?>
@@ -82,26 +88,36 @@ unset($_SESSION['login_username']);
                 </div>
             <?php endif; ?>
 
+            <div class="id-prefix-pills" aria-label="ID prefix guide">
+                <span><b>P</b> Patient</span>
+                <span><b>S</b> Staff</span>
+                <span><b>C</b> Cashier</span>
+                <span><b>D</b> Doctor</span>
+                <span><b>A</b> Admin</span>
+            </div>
+
             <form method="post" action="index.php">
                 <?= csrf_field() ?>
                 <input type="hidden" name="action" value="login">
-                <?= field('Username', 'username', 'Enter your username', 'text', $username) ?>
-                <?= field('Password', 'password', 'Enter your password', 'password', $password) ?>
+                <label class="field">
+                    <span class="field-label">User / Patient ID</span>
+                    <span class="input-wrap">
+                        <input type="text" name="user_id" id="login-user-id" placeholder="e.g. P-1001, S-1001, C-1001, D-1001, or A-0001" value="<?= e($userId) ?>" required>
+                    </span>
+                    <small class="field-hint">Patients use the <b>P-xxxx</b> ID issued by Front Desk Staff during registration.</small>
+                </label>
+                <?= field('Username, Email, or Name', 'username', 'e.g. admin or your email', 'text', $username) ?>
+                <?= field('Password', 'password', 'Enter your password', 'password') ?>
                 <div class="forgot-row">
                     <label><input type="checkbox" name="remember"> Remember me</label>
-                    <button type="submit" name="action" value="forgot" formnovalidate>Forgot password?</button>
+                    <a class="text-link" href="index.php?auth=login&amp;forgot=1" style="font-size:13px;">Forgot password?</a>
                 </div>
-                <?= button('Login', ['type' => 'submit']) ?>
+                <button class="btn btn-primary" type="submit" name="action" value="login"><span>Sign in</span></button>
             </form>
 
-            <div class="demo-accounts">
-                <span>Prototype accounts</span>
-                <p>
-                    <a href="index.php?demo=admin">admin</a>
-                    <a href="index.php?demo=staff">staff</a>
-                    <a href="index.php?demo=doctor">doctor</a>
-                </p>
-                <small>Use “wrong” or “disabled” to preview error states.</small>
+            <div class="auth-switch-box">
+                <span>Don’t have an account yet?</span>
+                <a class="text-link" href="index.php?auth=register">Create an account <?= icon('arrow', 14) ?></a>
             </div>
         </div>
         <p class="login-footer">© <?= date('Y') ?> MediCore Health · Privacy · Support</p>
