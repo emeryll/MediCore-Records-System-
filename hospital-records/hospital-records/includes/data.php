@@ -11,6 +11,7 @@ function nav_for(string $role): array
             ['Roles', 'shield', 'roles'],
             ['Departments', 'building', 'departments'],
             ['Rooms', 'bed', 'rooms'],
+            ['Sales Records', 'card', 'sales-records'],
             ['Archive', 'clipboard', 'archive'],
             ['Audit Logs', 'history', 'audit-logs'],
         ],
@@ -51,13 +52,14 @@ function routes_for(string $role): array
 {
     return match ($role) {
         'Admin' => [
-            'dashboard'   => 'pages/admin/dashboard.php',
-            'users'       => 'pages/admin/users.php',
-            'roles'       => 'pages/admin/roles.php',
-            'departments' => 'pages/admin/crud.php',
-            'rooms'       => 'pages/admin/crud.php',
-            'archive'     => 'pages/admin/archive.php',
-            'audit-logs'  => 'pages/admin/audit.php',
+            'dashboard'     => 'pages/admin/dashboard.php',
+            'users'         => 'pages/admin/users.php',
+            'roles'         => 'pages/admin/roles.php',
+            'departments'   => 'pages/admin/crud.php',
+            'rooms'         => 'pages/admin/crud.php',
+            'sales-records' => 'pages/admin/sales.php',
+            'archive'       => 'pages/admin/archive.php',
+            'audit-logs'    => 'pages/admin/audit.php',
         ],
         'Staff' => [
             'dashboard'    => 'pages/staff/dashboard.php',
@@ -97,6 +99,9 @@ function routes_for(string $role): array
 function details_for(string $role): array
 {
     return match ($role) {
+        'Admin'   => [
+            'receipt' => 'pages/cashier/receipt.php',
+        ],
         'Staff'   => ['profile' => 'pages/staff/patient_profile.php'],
         'Cashier' => [
             'receipt' => 'pages/cashier/receipt.php',
@@ -107,7 +112,8 @@ function details_for(string $role): array
             'lab'        => 'pages/doctor/lab_detail.php',
         ],
         'Patient' => [
-            'bill' => 'pages/patient/bill_detail.php',
+            'bill'    => 'pages/patient/bill_detail.php',
+            'receipt' => 'pages/cashier/receipt.php',
         ],
         default => [],
     };

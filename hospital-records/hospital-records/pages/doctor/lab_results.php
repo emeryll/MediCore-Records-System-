@@ -30,11 +30,14 @@ $toolbar = toolbar_open('lab-results')
         <td><?= badge($r[3], $r[3] === 'Done' ? 'success' : 'warning') ?></td>
         <td><?= e($r[4]) ?></td>
         <td>
-            <?php if ($r[3] === 'Done'): ?>
-                <a class="text-link" href="<?= e(url(['page' => 'lab-results', 'detail' => 'lab', 'test' => $r[0]])) ?>">View result <?= icon('arrow', 14) ?></a>
-            <?php else: ?>
-                <?= post_button('Mark done', 'complete_lab', ['test_id' => $r[0]], ['variant' => 'secondary']) ?>
-            <?php endif; ?>
+            <div class="row-actions">
+                <a class="text-link" href="<?= e(url(['page' => 'lab-results', 'detail' => 'lab', 'test' => $r[0]])) ?>">
+                    <?= $r[3] === 'Done' ? 'View result' : 'Review / Findings' ?> <?= icon('arrow', 14) ?>
+                </a>
+                <?php if ($r[3] !== 'Done'): ?>
+                    <?= post_button('Mark done', 'complete_lab', ['test_id' => $r[0]], ['variant' => 'secondary']) ?>
+                <?php endif; ?>
+            </div>
         </td>
     </tr>
 <?php endforeach; ?>

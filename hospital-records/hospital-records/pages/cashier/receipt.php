@@ -10,8 +10,15 @@ foreach ($state['payments'] ?? [] as $py) {
     }
 }
 
+$retPage   = (string) ($_GET['from_page'] ?? ($_GET['page'] ?? 'payment-history'));
+if ($retPage === 'receipt' || $retPage === '') {
+    $retPage = ($role === 'Admin') ? 'sales-records' : (($role === 'Patient') ? 'bills' : 'payment-history');
+}
+$backUrl   = url(['page' => $retPage]);
+$backLabel = $retPage === 'sales-records' ? '← Back to sales records' : ($retPage === 'bills' ? '← Back to bills' : '← Back to payment history');
+
 if ($payment === null): ?>
-    <a class="back-link" href="<?= e(url(['page' => 'payment-history'])) ?>">← Back to payment history</a>
+    <a class="back-link" href="<?= e($backUrl) ?>"><?= e($backLabel) ?></a>
     <?= filtered_empty('Official receipt not found.') ?>
 <?php return; endif;
 
@@ -23,11 +30,11 @@ $items   = (!empty($payment['items']) && is_array($payment['items']))
     : default_bill_items(parse_money($payment['amount_paid'] ?? 0));
 
 $actions = '<div class="button-pair">'
-    . button('Back to History', ['variant' => 'secondary', 'href' => url(['page' => 'payment-history'])])
+    . button($retPage === 'sales-records' ? 'Back to Sales' : 'Back to History', ['variant' => 'secondary', 'href' => $backUrl])
     . '<button type="button" class="btn btn-primary" onclick="window.print()">' . icon('printer', 17) . '<span>Print Receipt</span></button>'
     . '</div>';
 ?>
-<a class="back-link" href="<?= e(url(['page' => 'payment-history'])) ?>">← Back to payment history</a>
+<a class="back-link" href="<?= e($backUrl) ?>"><?= e($backLabel) ?></a>
 
 <?= page_title(
     'Official Receipt ' . ($payment['receipt_no'] ?? 'OR-1001'),

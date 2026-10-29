@@ -1,31 +1,33 @@
 <?php
-$patient  = trim((string) ($_GET['patient'] ?? ($state['patients'][0][0] ?? 'Patient')));
-$records  = $state['records'][$patient] ?? [];
-$open     = isset($_GET['open']) ? (int) $_GET['open'] : 0;
-$curPage  = (string) ($_GET['page'] ?? 'my-appointments');
-$base     = ['page' => $curPage, 'detail' => 'history', 'patient' => $patient];
+$patientParam = trim((string) ($_GET['patient'] ?? ($state['patients'][0][0] ?? 'Patient')));
+$ptIdentity   = resolve_patient_identity($state, $patientParam);
+$patient      = $ptIdentity['name'];
+$ptId         = $ptIdentity['id'];
+$records      = patient_medical_records($state, $patient, $ptId);
+$ptLabs       = patient_lab_results($state, $patient, $ptId);
+$open         = isset($_GET['open']) ? (int) $_GET['open'] : 0;
+$curPage      = (string) ($_GET['page'] ?? 'my-appointments');
+$base         = ['page' => $curPage, 'detail' => 'history', 'patient' => $patient];
 
 // Clinical summary: aggregate conditions and meds from all records
 $conditions = [];
 $meds       = [];
 foreach ($records as $rec) {
-    foreach ($rec['diagnoses'] as $d) {
-        if ($d[1] !== '') {
+    foreach ($rec['diagnoses'] ?? [] as $d) {
+        if (!empty($d[1])) {
             $conditions[] = $d[1];
         }
     }
-    foreach ($rec['prescriptions'] as $p) {
+    foreach ($rec['prescriptions'] ?? [] as $p) {
         $meds[] = $p[0] . ' ' . $p[1];
     }
 }
 $conditions = array_unique(array_slice($conditions, 0, 4));
 $meds       = array_unique(array_slice($meds, 0, 4));
-$ptRecord   = find_patient_record($state, $patient);
-$ptId       = $ptRecord[8] ?? 'P-1001';
+$ptRecord   = $ptIdentity['record'] ?? find_patient_record($state, $patient);
 $ptDob      = format_birthdate($ptRecord[1] ?? '');
 $ptAge      = patient_age_label($ptDob, false, '—');
 $ptSex      = $ptRecord[5] ?? 'Not specified';
-$ptBlood    = $ptRecord[6] ?? 'Not specified';
 ?>
 <a class="back-link" href="<?= e(url(['page' => $curPage])) ?>">← Back to appointments</a>
 
@@ -43,14 +45,14 @@ $ptBlood    = $ptRecord[6] ?? 'Not specified';
         <div class="panel-head">
             <div>
                 <h2>Visit history</h2>
-                <p>Clinical notes and treatment history for <?= e($patient) ?></p>
+                <p>Clinical notes, prescriptions, and treatment history for <?= e($patient) ?></p>
             </div>
         </div>
 
         <div class="visit-history">
             <?php if (!$records): ?>
                 <div style="padding:32px 20px; text-align:center; color:var(--gray-500);">
-                    No records yet. <a class="text-link" href="<?= e(url(['page' => $curPage, 'detail' => 'new-record', 'patient' => $patient])) ?>">Start a consultation</a>
+                    No clinical records yet. <a class="text-link" href="<?= e(url(['page' => $curPage, 'detail' => 'new-record', 'patient' => $patient])) ?>">Start a consultation</a>
                 </div>
             <?php endif; ?>
             <?php foreach ($records as $i => $v): $isOpen = ($open === $i); ?>
@@ -58,33 +60,42 @@ $ptBlood    = $ptRecord[6] ?? 'Not specified';
                     <a href="<?= e(url($base + ['open' => $isOpen ? -1 : $i])) ?>">
                         <span class="history-marker"><?= icon('clipboard', 16) ?></span>
                         <div>
-                            <time><?= e($v['date']) ?></time>
-                            <strong><?= e($v['visit_type']) ?></strong>
-                            <p><?= e($v['doctor']) ?></p>
+                            <time><?= e($v['date'] ?? '') ?></time>
+                            <strong><?= e($v['visit_type'] ?? 'Consultation') ?></strong>
+                            <p><?= e($v['doctor'] ?? 'Physician') ?></p>
                         </div>
                         <?= badge(
-                            $v['status'],
-                            match($v['status']) { 'Completed' => 'success', 'Draft' => 'warning', default => 'info' }
+                            $v['status'] ?? 'Completed',
+                            match($v['status'] ?? '') { 'Completed' => 'success', 'Draft' => 'warning', default => 'info' }
                         ) ?>
                         <?= icon('down', 17) ?>
                     </a>
                     <?php if ($isOpen): ?>
                         <div class="history-detail">
-                            <?php if ($v['complaint'] !== ''): ?>
+                            <?php if (($v['status'] ?? '') === 'Draft'): ?>
+                                <div style="display:flex; justify-content:space-between; align-items:center; background:#fef3c7; border:1px solid #fde68a; padding:10px 14px; border-radius:6px; margin-bottom:12px;">
+                                    <span style="color:#92400e; font-size:12px; font-weight:600;">⚠️ This visit is saved as an in-progress draft.</span>
+                                    <a class="btn btn-secondary" style="font-size:11px; padding:4px 10px; background:white;" href="<?= e(url(['page' => $curPage, 'detail' => 'new-record', 'patient' => $patient, 'rec' => $v['id']])) ?>">
+                                        Continue editing draft →
+                                    </a>
+                                </div>
+                            <?php endif; ?>
+
+                            <?php if (!empty($v['complaint'])): ?>
                                 <div>
                                     <span>Chief complaint</span>
                                     <strong><?= e($v['complaint']) ?></strong>
                                 </div>
                             <?php endif; ?>
-                            <?php if ($v['notes'] !== ''): ?>
+                            <?php if (!empty($v['notes'])): ?>
                                 <div>
                                     <span>Clinical notes</span>
                                     <p class="history-notes"><?= e($v['notes']) ?></p>
                                 </div>
                             <?php endif; ?>
-                            <?php if ($v['diagnoses']): ?>
+                            <?php if (!empty($v['diagnoses'])): ?>
                                 <div>
-                                    <span>Diagnoses</span>
+                                    <span>Diagnoses (ICD-10)</span>
                                     <ul class="history-list">
                                         <?php foreach ($v['diagnoses'] as $d): ?>
                                             <li><strong><?= e($d[1] ?: $d[0]) ?></strong><?= $d[0] ? ' <em>(' . e($d[0]) . ')</em>' : '' ?></li>
@@ -92,7 +103,7 @@ $ptBlood    = $ptRecord[6] ?? 'Not specified';
                                     </ul>
                                 </div>
                             <?php endif; ?>
-                            <?php if ($v['prescriptions']): ?>
+                            <?php if (!empty($v['prescriptions'])): ?>
                                 <div>
                                     <span>Prescriptions</span>
                                     <ul class="history-list">
@@ -102,12 +113,12 @@ $ptBlood    = $ptRecord[6] ?? 'Not specified';
                                     </ul>
                                 </div>
                             <?php endif; ?>
-                            <?php if ($v['lab_orders']): ?>
+                            <?php if (!empty($v['lab_orders'])): ?>
                                 <div>
                                     <span>Lab orders</span>
                                     <ul class="history-list">
                                         <?php foreach ($v['lab_orders'] as $l): ?>
-                                            <li><?= e($l[0]) ?> <span class="muted">(<?= e($l[1]) ?>)</span></li>
+                                            <li><?= e($l[0]) ?> <span class="muted">(<?= e($l[1]) ?>)</span><?= !empty($l[2]) ? ' — <em>' . e($l[2]) . '</em>' : '' ?></li>
                                         <?php endforeach; ?>
                                     </ul>
                                 </div>
@@ -141,6 +152,7 @@ $ptBlood    = $ptRecord[6] ?? 'Not specified';
                 <div><dt>Current medications</dt><dd><?= e(implode(', ', $meds)) ?></dd></div>
             <?php endif; ?>
             <div><dt>Total visits</dt><dd><?= count($records) ?></dd></div>
+            <div><dt>Lab tests ordered</dt><dd><?= count($ptLabs) ?></dd></div>
         </dl>
     </aside>
 </div>

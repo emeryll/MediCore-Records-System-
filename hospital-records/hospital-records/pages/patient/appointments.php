@@ -1,12 +1,13 @@
 <?php
-$ptName = current_user_name('Patient');
+$idInfo = resolve_patient_identity($state);
+$ptName = $idInfo['name'];
 $tab    = ($_GET['tab'] ?? 'Upcoming') === 'Past' ? 'Past' : 'Upcoming';
 $mob    = $_GET['mobile'] ?? null;
 
 $upcoming = [];
 $past     = [];
 foreach ($state['appointments'] as $idx => $a) {
-    if ($a[1] !== $ptName) {
+    if (!matches_patient_identity($idInfo, $a[1] ?? '', $a[8] ?? null)) {
         continue;
     }
     if (in_array($a[3], ['Confirmed', 'Waiting', 'Upcoming', 'In progress'], true)) {

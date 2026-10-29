@@ -31,7 +31,7 @@ $action = $isDoctor ? '' : button('Register patient', [
 ?>
 <?= page_title('Patients', 'Find patient records, birthday, age, and register new patients.', $action) ?>
 
-<?= table_open(['Patient ID', 'Patient', 'Birthday', 'Age', 'Phone', 'Blood type', 'Insurance no.', 'Actions'], $toolbar) ?>
+<?= table_open(['Patient ID', 'Patient', 'Birthday', 'Age', 'Phone', 'Insurance no.', 'Actions'], $toolbar) ?>
 <?php foreach ($patients as $idx => $p):
     $link  = url(['page' => 'patients', 'detail' => $detailName, 'patient' => $p[0]]);
     $ptId  = $p[8] ?? ('P-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT));
@@ -49,9 +49,17 @@ $action = $isDoctor ? '' : button('Register patient', [
         <td><?= e($bdate) ?></td>
         <td><strong><?= e($age) ?></strong></td>
         <td><?= e($p[2]) ?></td>
-        <td><?= isset($p[6]) && $p[6] !== 'Not specified' ? badge($p[6], 'neutral') : '<span class="muted">Not specified</span>' ?></td>
         <td><code><?= e($p[3]) ?></code></td>
-        <td><a class="text-link" href="<?= e($link) ?>"><?= e($linkLabel) ?> <?= icon('arrow', 14) ?></a></td>
+        <td>
+            <div class="row-actions">
+                <a class="text-link" href="<?= e($link) ?>"><?= e($linkLabel) ?> <?= icon('arrow', 14) ?></a>
+                <?php if ($isDoctor): ?>
+                    <a class="text-link" style="color:var(--teal-800); font-weight:600;" href="<?= e(url(['page' => 'patients', 'detail' => 'new-record', 'patient' => $p[0]])) ?>">
+                        + New record
+                    </a>
+                <?php endif; ?>
+            </div>
+        </td>
     </tr>
 <?php endforeach; ?>
 <?= table_close(count($patients) . ' of ' . count($allPatients) . ' patients', false) ?>

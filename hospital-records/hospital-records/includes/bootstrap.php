@@ -261,38 +261,68 @@ function patient_prescriptions(array $state, ?string $nameOrId = null, ?string $
     $records = patient_medical_records($state, $idInfo['name'], $idInfo['id']);
     $out     = [];
     $seen    = [];
+
+    $normalizeRx = static function (array $raw, string $defaultDoc = 'Attending Physician', string $defaultDate = '', string $defaultRecCode = ''): array {
+        $med      = trim((string) ($raw['med'] ?? ($raw['medication'] ?? ($raw[0] ?? ''))));
+        $dosage   = trim((string) ($raw['dosage'] ?? ($raw[1] ?? 'As directed')));
+        $freq     = trim((string) ($raw['frequency'] ?? ($raw[2] ?? 'Once daily')));
+        $duration = trim((string) ($raw['duration'] ?? ($raw[3] ?? '30 days')));
+        $doc      = trim((string) ($raw['doctor'] ?? ($raw['doctor_name'] ?? $defaultDoc)));
+        $date     = trim((string) ($raw['date'] ?? ($raw['prescribed_date'] ?? ($defaultDate ?: date('M d, Y')))));
+        $recCode  = trim((string) ($raw['record_code'] ?? $defaultRecCode));
+        $status   = trim((string) ($raw['status'] ?? 'Active'));
+        $rxCode   = trim((string) ($raw['rx_code'] ?? ''));
+
+        return [
+            'med'             => $med,
+            'medication'      => $med,
+            'dosage'          => $dosage !== '' ? $dosage : 'As directed',
+            'frequency'       => $freq !== '' ? $freq : 'Once daily',
+            'duration'        => $duration !== '' ? $duration : '30 days',
+            'doctor'          => $doc !== '' ? $doc : 'Attending Physician',
+            'doctor_name'     => $doc !== '' ? $doc : 'Attending Physician',
+            'date'            => $date,
+            'prescribed_date' => $date,
+            'record_code'     => $recCode,
+            'rx_code'         => $rxCode,
+            'status'          => $status !== '' ? $status : 'Active',
+        ];
+    };
+
     foreach ($records as $rec) {
         $recCode = (string) ($rec['id'] ?? '');
+        $recDoc  = (string) ($rec['doctor'] ?? 'Attending Physician');
+        $recDate = (string) ($rec['date'] ?? date('M d, Y'));
         foreach ($rec['prescriptions'] ?? [] as $rx) {
-            $med = trim((string) ($rx[0] ?? ''));
-            if ($med === '' || $med === 'Select medication') {
+            $normalized = $normalizeRx(is_array($rx) ? $rx : ['med' => (string) $rx], $recDoc, $recDate, $recCode);
+            if ($normalized['med'] === '' || $normalized['med'] === 'Select medication') {
                 continue;
             }
-            $key = strtolower($recCode . '|' . $med . '|' . ($rx[1] ?? '') . '|' . ($rx[2] ?? ''));
+            $key = strtolower($normalized['med'] . '|' . $normalized['dosage'] . '|' . $normalized['frequency'] . '|' . $normalized['record_code']);
             if (!isset($seen[$key])) {
                 $seen[$key] = true;
-                $out[] = [
-                    'med'         => $med,
-                    'dosage'      => (string) ($rx[1] ?? 'As directed'),
-                    'frequency'   => (string) ($rx[2] ?? 'Once daily'),
-                    'duration'    => (string) ($rx[3] ?? '30 days'),
-                    'doctor'      => (string) ($rec['doctor'] ?? 'Attending Physician'),
-                    'date'        => (string) ($rec['date'] ?? date('M d, Y')),
-                    'record_code' => $recCode,
-                    'status'      => (string) ($rec['status'] ?? 'Active'),
-                ];
+                $out[] = $normalized;
             }
         }
     }
+
     foreach ($state['prescriptions'] ?? [] as $rxRow) {
+        if (!is_array($rxRow)) {
+            continue;
+        }
         if (matches_patient_identity($idInfo, (string) ($rxRow['patient_name'] ?? ''), (string) ($rxRow['patient_id'] ?? ''))) {
-            $key = strtolower(($rxRow['record_code'] ?? '') . '|' . ($rxRow['med'] ?? '') . '|' . ($rxRow['dosage'] ?? '') . '|' . ($rxRow['frequency'] ?? ''));
+            $normalized = $normalizeRx($rxRow);
+            if ($normalized['med'] === '' || $normalized['med'] === 'Select medication') {
+                continue;
+            }
+            $key = strtolower($normalized['med'] . '|' . $normalized['dosage'] . '|' . $normalized['frequency'] . '|' . $normalized['record_code']);
             if (!isset($seen[$key])) {
                 $seen[$key] = true;
-                $out[] = $rxRow;
+                $out[] = $normalized;
             }
         }
     }
+
     return $out;
 }
 

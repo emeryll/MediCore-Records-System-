@@ -1,10 +1,11 @@
 <?php
-$ptName = current_user_name('Patient');
-$mob    = $_GET['mobile'] ?? null;
+$idInfo  = resolve_patient_identity($state);
+$ptName  = $idInfo['name'];
+$mob     = $_GET['mobile'] ?? null;
 
 $myBills = [];
 foreach ($state['bills'] as $idx => $b) {
-    if ($b[0] === $ptName) {
+    if (matches_patient_identity($idInfo, $b[0] ?? '', null)) {
         $myBills[$idx] = $b;
     }
 }

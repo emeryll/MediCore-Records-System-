@@ -1,45 +1,35 @@
 <?php
-$ptName = current_user_name('Patient');
+$idInfo    = resolve_patient_identity($state);
+$ptName    = $idInfo['name'];
 $firstName = explode(' ', $ptName)[0];
-$mob = $_GET['mobile'] ?? null;
+$mob       = $_GET['mobile'] ?? null;
+$myPtId    = $idInfo['id'];
+$ptRecord  = $idInfo['record'] ?? find_patient_record($state, $ptName);
+$myDob     = format_birthdate($ptRecord[1] ?? '');
+$myAge     = patient_age_label($myDob, false, '—');
 
 // Find next upcoming appointment
-$nextAppt = null;
+$nextAppt    = null;
 $nextApptIdx = null;
 foreach ($state['appointments'] as $idx => $a) {
-    if ($a[1] === $ptName && in_array($a[3], ['Confirmed', 'Waiting', 'Upcoming', 'In progress'], true)) {
-        $nextAppt = $a;
+    if (matches_patient_identity($idInfo, $a[1] ?? '', $a[8] ?? null)
+        && in_array($a[3] ?? '', ['Confirmed', 'Waiting', 'Upcoming', 'In progress'], true)) {
+        $nextAppt    = $a;
         $nextApptIdx = $idx;
         break;
     }
 }
 
-// Collect active prescriptions from medical records
-$prescriptions = [];
-foreach ($state['records'][$ptName] ?? [] as $rec) {
-    foreach ($rec['prescriptions'] ?? [] as $rx) {
-        $prescriptions[] = [
-            'med'       => $rx[0],
-            'dosage'    => $rx[1],
-            'frequency' => $rx[2],
-            'duration'  => $rx[3],
-            'doctor'    => $rec['doctor'],
-            'date'      => $rec['date'],
-        ];
-    }
-}
+// Collect active prescriptions from medical records and relational prescriptions
+$prescriptions = patient_prescriptions($state, $ptName, $myPtId);
 
 // Find unpaid/pending bills for this patient
 $unpaidBills = [];
 foreach ($state['bills'] as $bIdx => $b) {
-    if ($b[0] === $ptName && $b[2] !== 'Paid') {
+    if (matches_patient_identity($idInfo, $b[0] ?? '', null) && ($b[2] ?? '') !== 'Paid') {
         $unpaidBills[] = ['idx' => $bIdx, 'row' => $b];
     }
 }
-$ptRecord = find_patient_record($state, $ptName);
-$myPtId   = $ptRecord[8] ?? ($_SESSION['user_id'] ?? 'P-1001');
-$myDob    = format_birthdate($ptRecord[1] ?? '');
-$myAge    = patient_age_label($myDob, false, '—');
 ?>
 <div class="pt-greeting-banner">
     <div>

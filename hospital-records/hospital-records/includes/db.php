@@ -143,6 +143,7 @@ function db_init_schema(PDO $pdo, string $driver): void
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS appointments (
         id {$autoInc},
+        patient_id VARCHAR(20) NOT NULL DEFAULT '',
         slot_time VARCHAR(20) NOT NULL,
         patient_name VARCHAR(150) NOT NULL,
         visit_type VARCHAR(80) NOT NULL DEFAULT 'Consultation',
@@ -152,6 +153,10 @@ function db_init_schema(PDO $pdo, string $driver): void
         department VARCHAR(100) NOT NULL,
         appt_date VARCHAR(40) NOT NULL
     )");
+    try {
+        $pdo->exec("ALTER TABLE appointments ADD COLUMN patient_id VARCHAR(20) NOT NULL DEFAULT ''");
+    } catch (Throwable) {
+    }
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS admissions (
         id {$autoInc},
@@ -214,7 +219,10 @@ function db_init_schema(PDO $pdo, string $driver): void
     $pdo->exec("CREATE TABLE IF NOT EXISTS medical_records (
         id {$autoInc},
         record_code VARCHAR(30) NOT NULL,
+        patient_id VARCHAR(20) NOT NULL DEFAULT '',
         patient_name VARCHAR(150) NOT NULL,
+        doctor_id VARCHAR(20) NOT NULL DEFAULT '',
+        doctor_name VARCHAR(150) NOT NULL,
         visit_date VARCHAR(40) NOT NULL,
         visit_type VARCHAR(80) NOT NULL,
         complaint TEXT NOT NULL,
@@ -222,18 +230,60 @@ function db_init_schema(PDO $pdo, string $driver): void
         diagnoses_json TEXT NOT NULL,
         prescriptions_json TEXT NOT NULL,
         lab_orders_json TEXT NOT NULL,
-        doctor_name VARCHAR(150) NOT NULL,
         status VARCHAR(30) NOT NULL DEFAULT 'Completed'
+    )");
+    foreach ([
+        "ALTER TABLE medical_records ADD COLUMN patient_id VARCHAR(20) NOT NULL DEFAULT ''",
+        "ALTER TABLE medical_records ADD COLUMN doctor_id VARCHAR(20) NOT NULL DEFAULT ''",
+    ] as $altMrSql) {
+        try {
+            $pdo->exec($altMrSql);
+        } catch (Throwable) {
+        }
+    }
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS prescriptions (
+        id {$autoInc},
+        rx_code VARCHAR(30) NOT NULL,
+        record_code VARCHAR(30) NOT NULL DEFAULT '',
+        patient_id VARCHAR(20) NOT NULL DEFAULT '',
+        patient_name VARCHAR(150) NOT NULL,
+        doctor_name VARCHAR(150) NOT NULL DEFAULT '',
+        medication VARCHAR(150) NOT NULL,
+        dosage VARCHAR(100) NOT NULL DEFAULT '',
+        frequency VARCHAR(100) NOT NULL DEFAULT '',
+        duration VARCHAR(100) NOT NULL DEFAULT '',
+        prescribed_date VARCHAR(40) NOT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'Active'
     )");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS lab_results (
         id {$autoInc},
         test_code VARCHAR(30) NOT NULL,
+        record_code VARCHAR(30) NOT NULL DEFAULT '',
+        patient_id VARCHAR(20) NOT NULL DEFAULT '',
         patient_name VARCHAR(150) NOT NULL,
+        doctor_name VARCHAR(150) NOT NULL DEFAULT '',
         test_name VARCHAR(120) NOT NULL,
+        priority VARCHAR(30) NOT NULL DEFAULT 'Routine',
         status VARCHAR(30) NOT NULL DEFAULT 'Pending',
+        clinical_notes TEXT DEFAULT NULL,
+        results_json TEXT DEFAULT NULL,
         collected_date VARCHAR(40) NOT NULL
     )");
+    foreach ([
+        "ALTER TABLE lab_results ADD COLUMN record_code VARCHAR(30) NOT NULL DEFAULT ''",
+        "ALTER TABLE lab_results ADD COLUMN patient_id VARCHAR(20) NOT NULL DEFAULT ''",
+        "ALTER TABLE lab_results ADD COLUMN doctor_name VARCHAR(150) NOT NULL DEFAULT ''",
+        "ALTER TABLE lab_results ADD COLUMN priority VARCHAR(30) NOT NULL DEFAULT 'Routine'",
+        "ALTER TABLE lab_results ADD COLUMN clinical_notes TEXT DEFAULT NULL",
+        "ALTER TABLE lab_results ADD COLUMN results_json TEXT DEFAULT NULL",
+    ] as $altLrSql) {
+        try {
+            $pdo->exec($altLrSql);
+        } catch (Throwable) {
+        }
+    }
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS archive_records (
         id {$autoInc},
@@ -1052,6 +1102,7 @@ function db_load_state(): array
             $a['doctor_name'],
             $a['department'],
             $a['appt_date'],
+            $a['patient_id'] ?? '',
         ];
     }
 
@@ -1144,6 +1195,10 @@ function db_load_state(): array
         $pt = $mr['patient_name'];
         $records[$pt][] = [
             'id'            => $mr['record_code'],
+            'patient_id'    => $mr['patient_id'] ?? '',
+            'patient_name'  => $pt,
+            'doctor_id'     => $mr['doctor_id'] ?? '',
+            'doctor'        => $mr['doctor_name'],
             'date'          => $mr['visit_date'],
             'visit_type'    => $mr['visit_type'],
             'complaint'     => $mr['complaint'],
@@ -1151,7 +1206,6 @@ function db_load_state(): array
             'diagnoses'     => json_decode((string) $mr['diagnoses_json'], true) ?: [],
             'prescriptions' => json_decode((string) $mr['prescriptions_json'], true) ?: [],
             'lab_orders'    => json_decode((string) $mr['lab_orders_json'], true) ?: [],
-            'doctor'        => $mr['doctor_name'],
             'status'        => $mr['status'],
         ];
     }
@@ -1159,7 +1213,40 @@ function db_load_state(): array
     // 8. Lab Results
     $labResults = [];
     foreach ($pdo->query('SELECT * FROM lab_results ORDER BY id DESC')->fetchAll() as $lr) {
-        $labResults[] = [$lr['test_code'], $lr['patient_name'], $lr['test_name'], $lr['status'], $lr['collected_date']];
+        $labResults[] = [
+            $lr['test_code'],
+            $lr['patient_name'],
+            $lr['test_name'],
+            $lr['status'],
+            $lr['collected_date'],
+            $lr['patient_id'] ?? '',
+            $lr['priority'] ?? 'Routine',
+            $lr['clinical_notes'] ?? '',
+            $lr['record_code'] ?? '',
+            $lr['doctor_name'] ?? '',
+            $lr['results_json'] ?? '',
+        ];
+    }
+
+    // 8b. Prescriptions
+    $prescriptions = [];
+    try {
+        foreach ($pdo->query('SELECT * FROM prescriptions ORDER BY id DESC')->fetchAll() as $rx) {
+            $prescriptions[] = [
+                'rx_code'         => (string) $rx['rx_code'],
+                'record_code'     => (string) ($rx['record_code'] ?? ''),
+                'patient_id'      => (string) ($rx['patient_id'] ?? ''),
+                'patient_name'    => (string) $rx['patient_name'],
+                'doctor_name'     => (string) ($rx['doctor_name'] ?? ''),
+                'medication'      => (string) $rx['medication'],
+                'dosage'          => (string) ($rx['dosage'] ?? ''),
+                'frequency'       => (string) ($rx['frequency'] ?? ''),
+                'duration'        => (string) ($rx['duration'] ?? ''),
+                'prescribed_date' => (string) $rx['prescribed_date'],
+                'status'          => (string) ($rx['status'] ?? 'Active'),
+            ];
+        }
+    } catch (Throwable) {
     }
 
     // 9. Roles from `roles` table (seeded on first run)
@@ -1245,6 +1332,7 @@ function db_load_state(): array
         'notifications' => $notifications,
         'appointments'  => $appointments,
         'records'       => $records,
+        'prescriptions' => $prescriptions,
         'lab_results'   => $labResults,
         'archive'       => $archive,
         'audit'         => $audit,
@@ -1317,17 +1405,24 @@ function db_save_state(array $state): void
 
         // Appointments
         $pdo->exec('DELETE FROM appointments');
-        $insAp = $pdo->prepare('INSERT INTO appointments (slot_time, patient_name, visit_type, status, complaint, doctor_name, department, appt_date) VALUES (:tm, :pt, :vt, :st, :cp, :dr, :dp, :dt)');
+        $insAp = $pdo->prepare('INSERT INTO appointments (patient_id, slot_time, patient_name, visit_type, status, complaint, doctor_name, department, appt_date) VALUES (:pid, :tm, :pt, :vt, :st, :cp, :dr, :dp, :dt)');
         foreach ($state['appointments'] ?? [] as $a) {
+            $ptName = (string) ($a[1] ?? '—');
+            $ptId   = (string) ($a[8] ?? '');
+            if ($ptId === '' && $ptName !== '—') {
+                $resolved = resolve_patient_identity($state, $ptName);
+                $ptId     = $resolved['id'];
+            }
             $insAp->execute([
-                ':tm' => $a[0] ?? '09:00',
-                ':pt' => $a[1] ?? '—',
-                ':vt' => $a[2] ?? 'Consultation',
-                ':st' => $a[3] ?? 'Confirmed',
-                ':cp' => $a[4] ?? '',
-                ':dr' => $a[5] ?? '—',
-                ':dp' => $a[6] ?? 'General Medicine',
-                ':dt' => $a[7] ?? date('M d, Y'),
+                ':pid' => $ptId,
+                ':tm'  => $a[0] ?? '09:00',
+                ':pt'  => $ptName,
+                ':vt'  => $a[2] ?? 'Consultation',
+                ':st'  => $a[3] ?? 'Confirmed',
+                ':cp'  => $a[4] ?? '',
+                ':dr'  => $a[5] ?? '—',
+                ':dp'  => $a[6] ?? 'General Medicine',
+                ':dt'  => $a[7] ?? date('M d, Y'),
             ]);
         }
 
@@ -1399,35 +1494,126 @@ function db_save_state(array $state): void
 
         // Medical Records
         $pdo->exec('DELETE FROM medical_records');
-        $insMr = $pdo->prepare('INSERT INTO medical_records (record_code, patient_name, visit_date, visit_type, complaint, notes, diagnoses_json, prescriptions_json, lab_orders_json, doctor_name, status) VALUES (:rc, :pt, :dt, :vt, :cp, :nt, :dg, :rx, :lb, :dr, :st)');
+        $insMr = $pdo->prepare('INSERT INTO medical_records (record_code, patient_id, patient_name, doctor_id, doctor_name, visit_date, visit_type, complaint, notes, diagnoses_json, prescriptions_json, lab_orders_json, status) VALUES (:rc, :pid, :pt, :did, :dr, :dt, :vt, :cp, :nt, :dg, :rx, :lb, :st)');
+        $allPrescriptionsToSave = [];
         foreach ($state['records'] ?? [] as $ptName => $recList) {
+            $ptResolved = resolve_patient_identity($state, $ptName);
             foreach (array_reverse($recList) as $r) {
+                $recPtId   = !empty($r['patient_id']) ? (string) $r['patient_id'] : $ptResolved['id'];
+                $recPtName = !empty($r['patient_name']) ? (string) $r['patient_name'] : $ptName;
+                $recDocId  = (string) ($r['doctor_id'] ?? '');
+                $recDoc    = (string) ($r['doctor'] ?? '—');
+                $recCode   = $r['id'] ?? ('REC-' . rand(1000, 9999));
+                $recDate   = $r['date'] ?? date('M d, Y');
+                $recStatus = $r['status'] ?? 'Completed';
+
                 $insMr->execute([
-                    ':rc' => $r['id'] ?? ('REC-' . rand(1000, 9999)),
-                    ':pt' => $ptName,
-                    ':dt' => $r['date'] ?? date('M d, Y'),
-                    ':vt' => $r['visit_type'] ?? 'Consultation',
-                    ':cp' => $r['complaint'] ?? '',
-                    ':nt' => $r['notes'] ?? '',
-                    ':dg' => json_encode($r['diagnoses'] ?? []),
-                    ':rx' => json_encode($r['prescriptions'] ?? []),
-                    ':lb' => json_encode($r['lab_orders'] ?? []),
-                    ':dr' => $r['doctor'] ?? '—',
-                    ':st' => $r['status'] ?? 'Completed',
+                    ':rc'  => $recCode,
+                    ':pid' => $recPtId,
+                    ':pt'  => $recPtName,
+                    ':did' => $recDocId,
+                    ':dr'  => $recDoc,
+                    ':dt'  => $recDate,
+                    ':vt'  => $r['visit_type'] ?? 'Consultation',
+                    ':cp'  => $r['complaint'] ?? '',
+                    ':nt'  => $r['notes'] ?? '',
+                    ':dg'  => json_encode($r['diagnoses'] ?? []),
+                    ':rx'  => json_encode($r['prescriptions'] ?? []),
+                    ':lb'  => json_encode($r['lab_orders'] ?? []),
+                    ':st'  => $recStatus,
+                ]);
+
+                // Collect prescriptions from this record
+                foreach ($r['prescriptions'] ?? [] as $rxIdx => $rx) {
+                    $med = trim((string) ($rx[0] ?? ''));
+                    if ($med !== '' && $med !== 'Select medication') {
+                        $allPrescriptionsToSave[] = [
+                            'rx_code'         => 'RX-' . strtoupper(substr(md5($recCode . '_' . $med . '_' . $rxIdx), 0, 6)),
+                            'record_code'     => $recCode,
+                            'patient_id'      => $recPtId,
+                            'patient_name'    => $recPtName,
+                            'doctor_name'     => $recDoc,
+                            'medication'      => $med,
+                            'dosage'          => (string) ($rx[1] ?? 'As directed'),
+                            'frequency'       => (string) ($rx[2] ?? 'Once daily'),
+                            'duration'        => (string) ($rx[3] ?? '30 days'),
+                            'prescribed_date' => $recDate,
+                            'status'          => 'Active',
+                        ];
+                    }
+                }
+            }
+        }
+
+        // Dedicated Prescriptions Table
+        try {
+            $pdo->exec('DELETE FROM prescriptions');
+            $insRx = $pdo->prepare('INSERT INTO prescriptions (rx_code, record_code, patient_id, patient_name, doctor_name, medication, dosage, frequency, duration, prescribed_date, status) VALUES (:rc, :rec, :pid, :pt, :dr, :md, :ds, :fq, :du, :dt, :st)');
+            // Also merge any standalone $state['prescriptions']
+            foreach ($state['prescriptions'] ?? [] as $stRx) {
+                $stMed = trim((string) ($stRx['medication'] ?? ($stRx['med'] ?? '')));
+                if ($stMed === '' || $stMed === 'Select medication') {
+                    continue;
+                }
+                $allPrescriptionsToSave[] = [
+                    'rx_code'         => $stRx['rx_code'] ?? ('RX-' . rand(1000, 9999)),
+                    'record_code'     => $stRx['record_code'] ?? '',
+                    'patient_id'      => $stRx['patient_id'] ?? '',
+                    'patient_name'    => $stRx['patient_name'] ?? '—',
+                    'doctor_name'     => $stRx['doctor_name'] ?? ($stRx['doctor'] ?? '—'),
+                    'medication'      => $stMed,
+                    'dosage'          => $stRx['dosage'] ?? 'As directed',
+                    'frequency'       => $stRx['frequency'] ?? 'Once daily',
+                    'duration'        => $stRx['duration'] ?? '30 days',
+                    'prescribed_date' => $stRx['prescribed_date'] ?? ($stRx['date'] ?? date('M d, Y')),
+                    'status'          => $stRx['status'] ?? 'Active',
+                ];
+            }
+            $seenRxCodes = [];
+            foreach ($allPrescriptionsToSave as $rxItem) {
+                if (isset($seenRxCodes[$rxItem['rx_code']])) {
+                    continue;
+                }
+                $seenRxCodes[$rxItem['rx_code']] = true;
+                $insRx->execute([
+                    ':rc'  => $rxItem['rx_code'],
+                    ':rec' => $rxItem['record_code'],
+                    ':pid' => $rxItem['patient_id'],
+                    ':pt'  => $rxItem['patient_name'],
+                    ':dr'  => $rxItem['doctor_name'],
+                    ':md'  => $rxItem['medication'],
+                    ':ds'  => $rxItem['dosage'],
+                    ':fq'  => $rxItem['frequency'],
+                    ':du'  => $rxItem['duration'],
+                    ':dt'  => $rxItem['prescribed_date'],
+                    ':st'  => $rxItem['status'],
                 ]);
             }
+        } catch (Throwable) {
         }
 
         // Lab Results
         $pdo->exec('DELETE FROM lab_results');
-        $insLr = $pdo->prepare('INSERT INTO lab_results (test_code, patient_name, test_name, status, collected_date) VALUES (:tc, :pt, :tn, :st, :dt)');
+        $insLr = $pdo->prepare('INSERT INTO lab_results (test_code, record_code, patient_id, patient_name, doctor_name, test_name, priority, status, clinical_notes, results_json, collected_date) VALUES (:tc, :rec, :pid, :pt, :dr, :tn, :pr, :st, :nt, :rj, :dt)');
         foreach (array_reverse($state['lab_results'] ?? []) as $lr) {
+            $lrPtName = (string) ($lr[1] ?? '—');
+            $lrPtId   = (string) ($lr[5] ?? '');
+            if ($lrPtId === '' && $lrPtName !== '—') {
+                $resolved = resolve_patient_identity($state, $lrPtName);
+                $lrPtId   = $resolved['id'];
+            }
             $insLr->execute([
-                ':tc' => $lr[0] ?? 'LAB-0000',
-                ':pt' => $lr[1] ?? '—',
-                ':tn' => $lr[2] ?? 'Test',
-                ':st' => $lr[3] ?? 'Pending',
-                ':dt' => $lr[4] ?? date('M d, Y'),
+                ':tc'  => $lr[0] ?? 'LAB-0000',
+                ':rec' => (string) ($lr[8] ?? ''),
+                ':pid' => $lrPtId,
+                ':pt'  => $lrPtName,
+                ':dr'  => (string) ($lr[9] ?? ''),
+                ':tn'  => $lr[2] ?? 'Test',
+                ':pr'  => (string) ($lr[6] ?? 'Routine'),
+                ':st'  => $lr[3] ?? 'Pending',
+                ':nt'  => (string) ($lr[7] ?? ''),
+                ':rj'  => (string) ($lr[10] ?? ''),
+                ':dt'  => $lr[4] ?? date('M d, Y'),
             ]);
         }
 

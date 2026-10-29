@@ -38,6 +38,29 @@ foreach ($rows as $r) {
     $filteredTotal += parse_money($r['amount_paid'] ?? 0);
 }
 
+if (isset($_GET['export'])) {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename=hospital_payments_' . date('Ymd_His') . '.csv');
+    $out = fopen('php://output', 'w');
+    fputcsv($out, ['Receipt No.', 'Bill No.', 'Patient Name', 'Amount Paid', 'Amount Received', 'Change Due', 'Payment Method', 'Reference No.', 'Cashier', 'Date & Time']);
+    foreach ($rows as $py) {
+        fputcsv($out, [
+            $py['receipt_no'] ?? '',
+            $py['bill_no'] ?? '',
+            $py['patient_name'] ?? '',
+            number_format(parse_money($py['amount_paid'] ?? 0), 2, '.', ''),
+            number_format(parse_money($py['amount_received'] ?? 0), 2, '.', ''),
+            number_format(parse_money($py['change_due'] ?? 0), 2, '.', ''),
+            $py['payment_method'] ?? 'Cash',
+            $py['reference_no'] ?? '—',
+            $py['cashier_name'] ?? '',
+            $py['paid_at'] ?? ($py['paid_date'] ?? ''),
+        ]);
+    }
+    fclose($out);
+    exit;
+}
+
 $toolbar = toolbar_open('payment-history')
     . search_box('Search receipt, bill, patient, or ref no...', 'q', $q)
     . '<div class="toolbar-right">'

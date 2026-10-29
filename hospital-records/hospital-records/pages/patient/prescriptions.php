@@ -1,18 +1,8 @@
 <?php
-$ptName = current_user_name('Patient');
-$prescriptions = [];
-foreach ($state['records'][$ptName] ?? [] as $rec) {
-    foreach ($rec['prescriptions'] ?? [] as $rx) {
-        $prescriptions[] = [
-            'med'       => $rx[0],
-            'dosage'    => $rx[1],
-            'frequency' => $rx[2],
-            'duration'  => $rx[3],
-            'doctor'    => $rec['doctor'],
-            'date'      => $rec['date'],
-        ];
-    }
-}
+$idInfo        = resolve_patient_identity($state);
+$ptName        = $idInfo['name'];
+$ptId          = $idInfo['id'];
+$prescriptions = patient_prescriptions($state, $ptName, $ptId);
 ?>
 <?= page_title(
     'Prescriptions',
@@ -26,8 +16,8 @@ foreach ($state['records'][$ptName] ?? [] as $rec) {
             <div class="pt-rx-card-head">
                 <span class="pt-rx-icon-lg"><?= icon('pill', 22) ?></span>
                 <div>
-                    <h3><?= e($rx['med']) ?></h3>
-                    <span>Prescribed <?= e($rx['date']) ?> by <?= e($rx['doctor']) ?></span>
+                    <h3><?= e($rx['med'] ?? ($rx['medication'] ?? 'Medication')) ?></h3>
+                    <span>Prescribed <?= e($rx['date'] ?? ($rx['prescribed_date'] ?? 'Recently')) ?> by <?= e($rx['doctor'] ?? ($rx['doctor_name'] ?? 'Attending Physician')) ?></span>
                 </div>
                 <?= badge('Active', 'success') ?>
             </div>

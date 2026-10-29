@@ -651,6 +651,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             unset($room);
             $st['discharges'][] = [$found[0], $found[1], $found[2], date('M d, Y'), $up['path'], time()];
+
+            // Push notification to patient
+            $ptDischargeId = resolve_patient_identity($st, $found[0]);
+            if (!isset($st['notifications']) || !is_array($st['notifications'])) {
+                $st['notifications'] = [];
+            }
+            array_unshift($st['notifications'], [
+                'title'   => 'Discharge completed',
+                'detail'  => 'Discharge from ' . $found[1] . ' (' . $found[2] . ') has been finalized. Please settle any outstanding balance with the cashier.',
+                'time'    => 'Just now',
+                'unread'  => true,
+                'role'    => 'Patient',
+                'user_id' => $ptDischargeId['id'],
+            ]);
+
             $logAudit('Updated', 'admissions', '#ADM-' . rand(1000, 9999));
             flash($found[0] . ' discharged — ' . $found[1] . ' is now available');
             redirect($return);
@@ -882,37 +897,82 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 static fn ($adm) => strcasecmp((string) $adm[0], $patient) !== 0 && $adm[1] !== $roomKey
             ));
             array_unshift($st['admissions'], [$patient, $roomKey, $roomWard, date('M d, Y'), $doctor, $reason]);
-            // Ensure an inpatient bill entry exists or is created
-            $hasBill = false;
-            foreach ($st['bills'] as $b) {
-                if ($b[0] === $patient && $b[2] !== 'Paid') {
-                    $hasBill = true;
+            // Automatically generate an itemized inpatient admission bill
+            $ptIdInfo    = resolve_patient_identity($st, $patient);
+            $ptCanonName = $ptIdInfo['name'];
+            $ptCanonId   = $ptIdInfo['id'];
+
+            $maxBillNum = 1000;
+            foreach ($st['bills'] ?? [] as $bIdx => $b) {
+                $nb = normalize_bill_row($b, $bIdx);
+                if (preg_match('/^BILL-0*(\d+)$/i', $nb['bill_no'], $bm)) {
+                    $maxBillNum = max($maxBillNum, (int) $bm[1]);
                 }
             }
-            if (!$hasBill) {
-                array_unshift($st['bills'], [$patient, '$1,450.00', 'Pending', date('M d, Y')]);
+            $newBillNo      = 'BILL-' . str_pad((string) ($maxBillNum + 1), 4, '0', STR_PAD_LEFT);
+            $roomDailyRate  = 1200.00;
+            $careRate       = 250.00;
+            $totalInpatient = $roomDailyRate + $careRate;
+            $admissionItems = [
+                ['Inpatient Room Admission (' . $roomKey . ' - ' . $roomWard . ')', 1, format_money($roomDailyRate), format_money($roomDailyRate)],
+                ['Admission Assessment & Nursing Care Fee', 1, format_money($careRate), format_money($careRate)],
+            ];
+            array_unshift($st['bills'], normalize_bill_row([
+                $ptCanonName,
+                format_money($totalInpatient),
+                'Unpaid',
+                date('M d, Y'),
+                $newBillNo,
+                0.0,
+                $admissionItems,
+            ], 0));
+
+            // Push notification to patient
+            if (!isset($st['notifications']) || !is_array($st['notifications'])) {
+                $st['notifications'] = [];
             }
+            array_unshift($st['notifications'], [
+                'title'   => 'Admitted to ' . $roomKey,
+                'detail'  => 'You were admitted to room ' . $roomKey . ' (' . $roomWard . '). Inpatient invoice #' . $newBillNo . ' (' . format_money($totalInpatient) . ') has been issued.',
+                'time'    => 'Just now',
+                'unread'  => true,
+                'role'    => 'Patient',
+                'user_id' => $ptCanonId,
+            ]);
             $logAudit('Created', 'admissions', '#ADM-' . rand(1000, 9999));
             flash($patient . ' admitted to ' . $roomKey);
             redirect(url(['page' => 'admissions']));
 
         case 'start_consultation':
             $patient = trim((string) ($_POST['patient'] ?? ''));
+            $idInfo  = resolve_patient_identity($st, $patient);
             foreach ($st['appointments'] as &$appt) {
-                if ($appt[1] === $patient && in_array($appt[3], ['Confirmed', 'Waiting', 'Upcoming'], true)) {
+                if (matches_patient_identity($idInfo, $appt[1] ?? '', $appt[8] ?? null)
+                    && in_array($appt[3], ['Confirmed', 'Waiting', 'Upcoming'], true)) {
                     $appt[3] = 'In progress';
                 }
             }
             unset($appt);
-            redirect(url(['page' => 'my-appointments', 'detail' => 'new-record', 'patient' => urlencode($patient)]));
+            redirect(url(['page' => 'my-appointments', 'detail' => 'new-record', 'patient' => urlencode($idInfo['name'])]));
 
         case 'save_record':
-            $patient    = trim((string) ($_POST['patient'] ?? ''));
-            $complaint  = trim((string) ($_POST['complaint'] ?? ''));
-            $notes      = trim((string) ($_POST['notes'] ?? ''));
-            $visitType  = trim((string) ($_POST['visit_type'] ?? 'Consultation'));
-            $recStatus  = in_array($_POST['record_status'] ?? '', ['Draft', 'Completed'], true)
+            $patientParam = trim((string) ($_POST['patient'] ?? ''));
+            $complaint    = trim((string) ($_POST['complaint'] ?? ''));
+            $notes        = trim((string) ($_POST['notes'] ?? ''));
+            $visitType    = trim((string) ($_POST['visit_type'] ?? 'Consultation'));
+            $recStatus    = in_array($_POST['record_status'] ?? '', ['Draft', 'Completed'], true)
                           ? (string) $_POST['record_status'] : 'Completed';
+            $editRecId    = trim((string) ($_POST['record_id'] ?? ''));
+
+            if ($patientParam === '') {
+                flash('Record not saved: no patient specified');
+                redirect($return);
+            }
+
+            // Resolve patient identity
+            $idInfo    = resolve_patient_identity($st, $patientParam, $_POST['patient_id'] ?? null);
+            $patient   = $idInfo['name'];
+            $patientId = $idInfo['id'];
 
             // Build diagnoses from parallel arrays
             $icd10s    = array_map('trim', (array) ($_POST['icd10'] ?? []));
@@ -926,10 +986,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             // Build prescriptions
-            $meds    = (array) ($_POST['medication'] ?? []);
-            $doses   = array_map('trim', (array) ($_POST['dosage'] ?? []));
-            $freqs   = (array) ($_POST['frequency'] ?? []);
-            $durs    = array_map('trim', (array) ($_POST['duration'] ?? []));
+            $meds          = (array) ($_POST['medication'] ?? []);
+            $doses         = array_map('trim', (array) ($_POST['dosage'] ?? []));
+            $freqs         = (array) ($_POST['frequency'] ?? []);
+            $durs          = array_map('trim', (array) ($_POST['duration'] ?? []));
             $prescriptions = [];
             foreach ($meds as $i => $med) {
                 if ($med !== '' && $med !== 'Select medication') {
@@ -938,23 +998,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             // Build lab orders
-            $tests    = (array) ($_POST['test'] ?? []);
-            $pris     = (array) ($_POST['priority'] ?? []);
+            $tests     = (array) ($_POST['test'] ?? []);
+            $pris      = (array) ($_POST['priority'] ?? []);
+            $labNotes  = array_map('trim', (array) ($_POST['lab_clinical_notes'] ?? []));
             $labOrders = [];
             foreach ($tests as $i => $test) {
                 if ($test !== '' && $test !== 'Select test') {
-                    $labOrders[] = [$test, $pris[$i] ?? 'Routine'];
+                    $labOrders[] = [$test, $pris[$i] ?? 'Routine', $labNotes[$i] ?? ''];
                 }
             }
 
-            if ($patient === '') {
-                flash('Record not saved: no patient specified');
-                redirect($return);
-            }
+            $recId = $editRecId !== '' ? $editRecId : ('REC-' . strtoupper(bin2hex(random_bytes(3))));
+            $doctorName = current_user_name('Doctor');
+            $doctorId   = $_SESSION['user_id'] ?? '';
 
-            $recId = 'REC-' . strtoupper(bin2hex(random_bytes(3)));
-            $rec   = [
+            $rec = [
                 'id'            => $recId,
+                'patient_id'    => $patientId,
+                'patient_name'  => $patient,
+                'doctor_id'     => $doctorId,
+                'doctor'        => $doctorName,
                 'date'          => date('M d, Y'),
                 'visit_type'    => $visitType,
                 'complaint'     => $complaint,
@@ -962,18 +1025,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'diagnoses'     => $diagnoses,
                 'prescriptions' => $prescriptions,
                 'lab_orders'    => $labOrders,
-                'doctor'        => current_user_name($role),
                 'status'        => $recStatus,
             ];
 
             if (!isset($st['records'][$patient])) {
                 $st['records'][$patient] = [];
             }
-            array_unshift($st['records'][$patient], $rec);
 
-            // Mark appointment status & sync complaint
+            // If editing an existing record, update in place
+            $updatedExisting = false;
+            if ($editRecId !== '') {
+                foreach ($st['records'] as $kName => &$rList) {
+                    foreach ($rList as &$existingR) {
+                        if (($existingR['id'] ?? '') === $editRecId) {
+                            $existingR = $rec;
+                            $updatedExisting = true;
+                            break 2;
+                        }
+                    }
+                }
+                unset($rList, $existingR);
+            }
+            if (!$updatedExisting) {
+                array_unshift($st['records'][$patient], $rec);
+            }
+
+            // Sync active prescriptions into $st['prescriptions']
+            if (!isset($st['prescriptions'])) {
+                $st['prescriptions'] = [];
+            }
+            // Remove previous prescriptions for this record code to prevent duplicates
+            if ($editRecId !== '') {
+                $st['prescriptions'] = array_values(array_filter(
+                    $st['prescriptions'],
+                    static fn ($p) => ($p['record_code'] ?? '') !== $editRecId
+                ));
+            }
+            foreach ($prescriptions as $pIdx => $rx) {
+                $st['prescriptions'][] = [
+                    'rx_code'         => 'RX-' . strtoupper(substr(md5($recId . '_' . $rx[0] . '_' . $pIdx), 0, 6)),
+                    'record_code'     => $recId,
+                    'patient_id'      => $patientId,
+                    'patient_name'    => $patient,
+                    'doctor_name'     => $doctorName,
+                    'medication'      => $rx[0],
+                    'dosage'          => $rx[1],
+                    'frequency'       => $rx[2],
+                    'duration'        => $rx[3],
+                    'prescribed_date' => date('M d, Y'),
+                    'status'          => 'Active',
+                ];
+            }
+
+            // Sync ordered lab tests to session lab results
+            if ($editRecId !== '') {
+                $st['lab_results'] = array_values(array_filter(
+                    $st['lab_results'],
+                    static fn ($lr) => ($lr[8] ?? '') !== $editRecId
+                ));
+            }
+            foreach ($labOrders as $order) {
+                $testId = strtoupper(substr(str_replace(' ', '', $order[0]), 0, 3)) . '-' . rand(1000, 9999);
+                array_unshift($st['lab_results'], [
+                    $testId,
+                    $patient,
+                    $order[0],
+                    'Pending',
+                    date('M d, Y'),
+                    $patientId,
+                    $order[1] ?? 'Routine',
+                    $order[2] ?? '',
+                    $recId,
+                    $doctorName,
+                    '',
+                ]);
+            }
+
+            // Mark matching appointment status & sync complaint
             foreach ($st['appointments'] as &$appt) {
-                if ($appt[1] === $patient) {
+                if (matches_patient_identity($idInfo, $appt[1] ?? '', $appt[8] ?? null)) {
                     $appt[3] = $recStatus === 'Draft' ? 'In progress' : 'Completed';
                     if ($complaint !== '') {
                         $appt[4] = $complaint;
@@ -982,22 +1112,59 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             unset($appt);
 
-            // Add ordered lab tests to session lab results
-            foreach ($labOrders as $order) {
-                $testId = strtoupper(substr(str_replace(' ', '', $order[0]), 0, 3)) . '-' . rand(1000, 9999);
-                array_unshift($st['lab_results'], [$testId, $patient, $order[0], 'Pending', date('M d, Y')]);
+            // Automatically generate consultation bill when finalized so it reflects in Patient portal and Cashier
+            if ($recStatus === 'Completed') {
+                $consultRate = 150.00;
+                $billItems   = [
+                    ['Doctor Consultation Fee (' . $visitType . ')', 1, format_money($consultRate), format_money($consultRate)],
+                ];
+                $totalBill = $consultRate;
+                foreach ($labOrders as $lo) {
+                    $labFee = 65.00;
+                    $billItems[] = [$lo[0] . ' (Diagnostic Lab Order)', 1, format_money($labFee), format_money($labFee)];
+                    $totalBill += $labFee;
+                }
+                $billNo = 'BILL-' . str_pad((string) (1001 + count($st['bills'])), 4, '0', STR_PAD_LEFT);
+                array_unshift($st['bills'], [
+                    $patient,
+                    format_money($totalBill),
+                    'Unpaid',
+                    date('M d, Y'),
+                    $billNo,
+                    0.0,
+                    $billItems,
+                ]);
+
+                // Push notification to patient
+                array_unshift($st['notifications'], [
+                    'title'   => 'New visit summary available',
+                    'detail'  => 'Dr. ' . $doctorName . ' completed your consultation summary and prescribed ' . count($prescriptions) . ' medication(s).',
+                    'time'    => 'Just now',
+                    'unread'  => true,
+                    'role'    => 'Patient',
+                    'user_id' => $patientId,
+                ]);
             }
 
-            $logAudit('Created', 'medical_records', '#' . $recId);
-            flash($recStatus === 'Draft' ? 'Draft saved for ' . $patient : 'Visit completed for ' . $patient);
+            $logAudit($editRecId !== '' ? 'Updated' : 'Created', 'medical_records', '#' . $recId);
+            flash($recStatus === 'Draft' ? 'Draft saved for ' . $patient : 'Consultation finalized and reflected on ' . $patient . '\'s account.');
             redirect(url(['page' => 'my-appointments', 'detail' => 'history', 'patient' => urlencode($patient)]));
 
         case 'complete_lab':
-            $testId = trim((string) ($_POST['test_id'] ?? ''));
+            $testId   = trim((string) ($_POST['test_id'] ?? ''));
+            $docNotes = trim((string) ($_POST['clinical_notes'] ?? ''));
             foreach ($st['lab_results'] as &$lr) {
                 if ($lr[0] === $testId) {
                     $lr[3] = 'Done';
-                    flash('Lab test ' . $testId . ' marked as Done');
+                    if ($docNotes !== '') {
+                        $lr[7] = $docNotes;
+                    }
+                    if (empty($lr[9])) {
+                        $lr[9] = current_user_name('Doctor');
+                    }
+                    $logAudit('Completed', 'lab_results', '#' . $testId);
+                    flash('Lab test ' . $testId . ' marked as Completed / Normal');
+                    break;
                 }
             }
             unset($lr);
@@ -1157,6 +1324,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             array_unshift($st['payments'], $paymentRow);
 
+            // Push notification to patient
+            $ptPaymentId = resolve_patient_identity($st, $normBill['patient']);
+            if (!isset($st['notifications']) || !is_array($st['notifications'])) {
+                $st['notifications'] = [];
+            }
+            array_unshift($st['notifications'], [
+                'title'   => 'Payment receipt issued (' . $receiptNo . ')',
+                'detail'  => 'Official receipt ' . $receiptNo . ' for ' . format_money($amtPay) . ' received via ' . $method . ' for Bill #' . $normBill['bill_no'] . ' (Balance: ' . format_money($newBalance) . ').',
+                'time'    => 'Just now',
+                'unread'  => true,
+                'role'    => 'Patient',
+                'user_id' => $ptPaymentId['id'],
+            ]);
+
             $logAudit('Collected', 'payments', $receiptNo);
             flash('Payment of ' . format_money($amtPay) . ' confirmed (' . $receiptNo . ')');
             redirect(url(['page' => 'process-payment', 'bill' => $normBill['bill_no'], 'success_or' => $receiptNo]));
@@ -1196,6 +1377,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $maxBillNum = max($maxBillNum, (int) $bm[1]);
                 }
             }
+            $ptBillId = resolve_patient_identity($st, $patient);
+            $patient  = $ptBillId['name'];
+
             $newBillNo = 'BILL-' . str_pad((string) ($maxBillNum + 1), 4, '0', STR_PAD_LEFT);
             array_unshift($st['bills'], normalize_bill_row([
                 $patient,
@@ -1206,6 +1390,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 0.0,
                 $items,
             ], 0));
+
+            // Push notification to patient
+            if (!isset($st['notifications']) || !is_array($st['notifications'])) {
+                $st['notifications'] = [];
+            }
+            array_unshift($st['notifications'], [
+                'title'   => 'New invoice issued (' . $newBillNo . ')',
+                'detail'  => 'A hospital statement of ' . format_money($total) . ' has been issued. You may review your itemized charges under Bills.',
+                'time'    => 'Just now',
+                'unread'  => true,
+                'role'    => 'Patient',
+                'user_id' => $ptBillId['id'],
+            ]);
+
             $logAudit('Created', 'bills', $newBillNo);
             flash('Bill ' . $newBillNo . ' (' . format_money($total) . ') created for ' . $patient);
             redirect($return);

@@ -74,7 +74,24 @@ $ptAge    = patient_age_label($ptDob, true, 'Active patient');
 <?php endforeach; ?>
 <?= table_close(count($results) . ' components', false) ?>
 
-<div class="panel lab-note">
-    <h2>Clinical note</h2>
-    <p>All measured components for <?= e($patient) ?>'s <?= e(strtolower($testName)) ?> are within the normal reference range. No immediate follow-up is required.</p>
-</div>
+<?php if ($status !== 'Done'): ?>
+    <form class="panel lab-note" method="post" action="index.php" style="margin-top:18px;">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="complete_lab">
+        <input type="hidden" name="test_id" value="<?= e($testId) ?>">
+        <input type="hidden" name="return" value="<?= e(url(['page' => 'lab-results', 'detail' => 'lab', 'test' => $testId])) ?>">
+        <h2>Complete laboratory findings</h2>
+        <p style="font-size:12px; color:var(--gray-600); margin:4px 0 12px;">Review measured components and submit your clinical interpretation to mark this test completed.</p>
+        <?= textarea_field('Physician / Laboratory clinical note', 'clinical_notes', 'Enter clinical assessment...', !empty($labItem[7]) ? $labItem[7] : 'All measured components for ' . $patient . '\'s ' . strtolower($testName) . ' are within normal reference limits. No acute clinical intervention required.') ?>
+        <div style="margin-top:14px;">
+            <button type="submit" class="btn btn-primary">
+                <?= icon('check', 16) ?> <span>Mark test completed</span>
+            </button>
+        </div>
+    </form>
+<?php else: ?>
+    <div class="panel lab-note">
+        <h2>Clinical note</h2>
+        <p><?= e(!empty($labItem[7]) ? $labItem[7] : 'All measured components for ' . $patient . '\'s ' . strtolower($testName) . ' are within the normal reference range. No immediate follow-up is required.') ?></p>
+    </div>
+<?php endif; ?>

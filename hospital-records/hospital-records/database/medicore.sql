@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS `medications` (
 -- 7. Appointments
 CREATE TABLE IF NOT EXISTS `appointments` (
     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `patient_id` VARCHAR(20) NOT NULL DEFAULT '' COMMENT 'Prefix ID: P-xxxx',
     `slot_time` VARCHAR(20) NOT NULL,
     `patient_name` VARCHAR(150) NOT NULL,
     `visit_type` VARCHAR(80) NOT NULL DEFAULT 'Consultation',
@@ -116,18 +117,41 @@ CREATE TABLE IF NOT EXISTS `discharges` (
 -- 10. Bills
 CREATE TABLE IF NOT EXISTS `bills` (
     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `bill_no` VARCHAR(40) NOT NULL DEFAULT '',
     `patient_name` VARCHAR(150) NOT NULL,
     `amount` VARCHAR(40) NOT NULL,
+    `paid_amount` VARCHAR(40) NOT NULL DEFAULT '0',
     `status` VARCHAR(30) NOT NULL DEFAULT 'Unpaid',
     `issued_date` VARCHAR(40) NOT NULL,
-    `receipt_path` VARCHAR(255) DEFAULT NULL
+    `receipt_path` VARCHAR(255) DEFAULT NULL,
+    `items_json` LONGTEXT DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 10b. Payments
+CREATE TABLE IF NOT EXISTS `payments` (
+    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `receipt_no` VARCHAR(40) NOT NULL,
+    `bill_no` VARCHAR(40) NOT NULL,
+    `patient_name` VARCHAR(150) NOT NULL,
+    `amount_paid` VARCHAR(40) NOT NULL DEFAULT '0.00',
+    `amount_received` VARCHAR(40) NOT NULL DEFAULT '0.00',
+    `change_due` VARCHAR(40) NOT NULL DEFAULT '0.00',
+    `payment_method` VARCHAR(40) NOT NULL DEFAULT 'Cash',
+    `reference_no` VARCHAR(80) NOT NULL DEFAULT '',
+    `cashier_name` VARCHAR(150) NOT NULL DEFAULT 'Hospital Cashier',
+    `paid_date` VARCHAR(20) NOT NULL,
+    `paid_at` VARCHAR(60) NOT NULL,
+    `items_json` LONGTEXT DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 11. Medical Records
 CREATE TABLE IF NOT EXISTS `medical_records` (
     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `record_code` VARCHAR(30) NOT NULL,
+    `patient_id` VARCHAR(20) NOT NULL DEFAULT '' COMMENT 'Prefix ID: P-xxxx',
     `patient_name` VARCHAR(150) NOT NULL,
+    `doctor_id` VARCHAR(20) NOT NULL DEFAULT '' COMMENT 'Prefix ID: D-xxxx',
+    `doctor_name` VARCHAR(150) NOT NULL,
     `visit_date` VARCHAR(40) NOT NULL,
     `visit_type` VARCHAR(80) NOT NULL,
     `complaint` TEXT NOT NULL,
@@ -135,17 +159,38 @@ CREATE TABLE IF NOT EXISTS `medical_records` (
     `diagnoses_json` TEXT NOT NULL,
     `prescriptions_json` TEXT NOT NULL,
     `lab_orders_json` TEXT NOT NULL,
-    `doctor_name` VARCHAR(150) NOT NULL,
     `status` VARCHAR(30) NOT NULL DEFAULT 'Completed'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 11b. Prescriptions (dedicated relational table)
+CREATE TABLE IF NOT EXISTS `prescriptions` (
+    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `rx_code` VARCHAR(30) NOT NULL,
+    `record_code` VARCHAR(30) NOT NULL DEFAULT '',
+    `patient_id` VARCHAR(20) NOT NULL DEFAULT '',
+    `patient_name` VARCHAR(150) NOT NULL,
+    `doctor_name` VARCHAR(150) NOT NULL DEFAULT '',
+    `medication` VARCHAR(150) NOT NULL,
+    `dosage` VARCHAR(100) NOT NULL DEFAULT '',
+    `frequency` VARCHAR(100) NOT NULL DEFAULT '',
+    `duration` VARCHAR(100) NOT NULL DEFAULT '',
+    `prescribed_date` VARCHAR(40) NOT NULL,
+    `status` VARCHAR(30) NOT NULL DEFAULT 'Active'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 12. Lab Results
 CREATE TABLE IF NOT EXISTS `lab_results` (
     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `test_code` VARCHAR(30) NOT NULL,
+    `record_code` VARCHAR(30) NOT NULL DEFAULT '',
+    `patient_id` VARCHAR(20) NOT NULL DEFAULT '',
     `patient_name` VARCHAR(150) NOT NULL,
+    `doctor_name` VARCHAR(150) NOT NULL DEFAULT '',
     `test_name` VARCHAR(120) NOT NULL,
+    `priority` VARCHAR(30) NOT NULL DEFAULT 'Routine',
     `status` VARCHAR(30) NOT NULL DEFAULT 'Pending',
+    `clinical_notes` TEXT DEFAULT NULL,
+    `results_json` TEXT DEFAULT NULL,
     `collected_date` VARCHAR(40) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

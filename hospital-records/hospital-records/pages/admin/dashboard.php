@@ -6,14 +6,23 @@ $totalRooms = count($state['crud']['rooms']);
 $occRooms   = count(array_filter($state['crud']['rooms'], static fn ($r) => $r[2] === 'Occupied'));
 $occPct     = $totalRooms > 0 ? round(($occRooms / $totalRooms) * 100) . '%' : '0%';
 $totalPts   = count($state['patients'] ?? patients_data());
+$allPayments = $state['payments'] ?? [];
+$totalRevenueAll = 0.0;
+foreach ($allPayments as $py) {
+    $totalRevenueAll += parse_money($py['amount_paid'] ?? 0);
+}
 ?>
-<?= page_title('Good morning, ' . current_user_name('Admin'), 'Here’s what’s happening across the hospital today.') ?>
+<?= page_title(
+    'Good morning, ' . current_user_name('Admin'),
+    'Here’s what’s happening across the hospital today.',
+    button('Sales records', ['icon' => 'card', 'href' => url(['page' => 'sales-records'])])
+) ?>
 
 <div class="stats-grid">
-    <?= stat_card('Total users', (string) $totalUsers, 'Staff accounts', 'users') ?>
-    <?= stat_card('Active doctors', (string) $activeDocs, 'On duty today', 'patient', 'navy') ?>
+    <?= stat_card('Total users', (string) $totalUsers, 'Staff & doctor accounts', 'users') ?>
+    <?= stat_card('Total revenue', format_money($totalRevenueAll), count($allPayments) . ' payments collected', 'card', 'green') ?>
     <?= stat_card('Rooms occupied', $occPct, $occRooms . ' of ' . $totalRooms . ' rooms', 'bed', 'amber') ?>
-    <?= stat_card('Registered patients', (string) $totalPts, count($state['admissions']) . ' currently admitted', 'clipboard', 'green') ?>
+    <?= stat_card('Registered patients', (string) $totalPts, count($state['admissions']) . ' currently admitted', 'clipboard', 'blue') ?>
 </div>
 
 <div class="content-grid">

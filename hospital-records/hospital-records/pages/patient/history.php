@@ -1,26 +1,23 @@
 <?php
-$ptName  = current_user_name('Patient');
-$records = $state['records'][$ptName] ?? [];
+$idInfo  = resolve_patient_identity($state);
+$ptName  = $idInfo['name'];
+$ptId    = $idInfo['id'];
+$records = patient_medical_records($state, $ptName, $ptId);
 $open    = isset($_GET['open']) ? (int) $_GET['open'] : 0;
 $mob     = $_GET['mobile'] ?? null;
-
-// Lab results for this patient
-$ptLabs = array_values(array_filter(
-    $state['lab_results'],
-    static fn ($lr) => $lr[1] === $ptName
-));
+$ptLabs  = patient_lab_results($state, $ptName, $ptId);
 ?>
 <?= page_title(
     'Medical History',
-    'Read-only timeline of your past hospital visits, diagnoses, and lab results.',
-    badge('Read-only medical record', 'neutral')
+    'Read-only timeline of your past hospital visits, diagnoses, prescriptions, and lab results.',
+    badge('Patient ID: ' . $ptId, 'neutral')
 ) ?>
 
 <div class="panel">
     <div class="panel-head">
         <div>
             <h2>Visit timeline</h2>
-            <p>Tap any visit below to view full diagnoses, clinical notes, and lab results</p>
+            <p>Tap any visit below to view full diagnoses, clinical notes, prescriptions, and lab results</p>
         </div>
     </div>
 
@@ -33,11 +30,11 @@ $ptLabs = array_values(array_filter(
                 <a href="<?= e(url(['page' => 'history', 'open' => $isOpen ? -1 : $i, 'mobile' => $mob])) ?>">
                     <span class="history-marker"><?= icon('clipboard', 16) ?></span>
                     <div>
-                        <time><?= e($v['date']) ?> · <?= e($v['doctor']) ?></time>
-                        <strong><?= e($v['visit_type']) ?> — <?= e($v['complaint']) ?></strong>
+                        <time><?= e($v['date'] ?? '') ?> · <?= e($v['doctor'] ?? 'Attending Physician') ?></time>
+                        <strong><?= e($v['visit_type'] ?? 'Consultation') ?> — <?= e($v['complaint'] ?: 'Routine checkup') ?></strong>
                         <p>Diagnosis: <?= e($primaryDiag) ?></p>
                     </div>
-                    <?= badge('Completed', 'success') ?>
+                    <?= badge($v['status'] ?? 'Completed', ($v['status'] ?? '') === 'Draft' ? 'warning' : 'success') ?>
                     <?= icon('down', 17) ?>
                 </a>
 
@@ -64,16 +61,40 @@ $ptLabs = array_values(array_filter(
                             <?php endif; ?>
                         </div>
                         <div>
-                            <span>Lab results & ordered panels</span>
+                            <span>Prescriptions given</span>
+                            <?php if (!empty($v['prescriptions'])): ?>
+                                <ul class="history-list">
+                                    <?php foreach ($v['prescriptions'] as $rx): ?>
+                                        <li>
+                                            <strong><?= e($rx[0]) ?> <?= e($rx[1] ?? '') ?></strong> — <?= e($rx[2] ?? 'Once daily') ?>, <?= e($rx[3] ?? '30 days') ?>
+                                        </li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            <?php else: ?>
+                                <p class="muted">No medications prescribed for this visit.</p>
+                            <?php endif; ?>
+                        </div>
+                        <div>
+                            <span>Lab results &amp; ordered panels</span>
                             <?php if (!empty($v['lab_orders']) || $ptLabs): ?>
                                 <div class="pt-lab-inline-list">
-                                    <?php foreach ($ptLabs as $lr): ?>
+                                    <?php
+                                    $displayLabs = $ptLabs ?: [];
+                                    if (!$displayLabs && !empty($v['lab_orders'])) {
+                                        foreach ($v['lab_orders'] as $loIdx => $lo) {
+                                            $displayLabs[] = ['LAB-' . (1000 + $loIdx), $ptName, $lo[0], 'Pending', $v['date'] ?? date('M d, Y')];
+                                        }
+                                    }
+                                    foreach ($displayLabs as $lr):
+                                        $lrDone = ($lr[3] ?? '') === 'Done';
+                                        $lrNote = !empty($lr[7]) ? $lr[7] : ($lrDone ? 'All components within normal reference range.' : 'Awaiting laboratory processing and results verification.');
+                                    ?>
                                         <div class="pt-lab-inline-card">
                                             <div>
                                                 <strong><?= e($lr[2]) ?> (<code><?= e($lr[0]) ?></code>)</strong>
-                                                <small>Collected <?= e($lr[4]) ?> · WBC 7.2 · RBC 4.8 · Hemoglobin 13.8 g/dL (Normal)</small>
+                                                <small>Collected <?= e($lr[4]) ?> · <?= e($lrNote) ?></small>
                                             </div>
-                                            <?= badge($lr[3] === 'Done' ? 'Normal / Done' : $lr[3], $lr[3] === 'Done' ? 'success' : 'warning') ?>
+                                            <?= badge($lrDone ? 'Completed / Normal' : 'Pending', $lrDone ? 'success' : 'warning') ?>
                                         </div>
                                     <?php endforeach; ?>
                                 </div>
@@ -90,6 +111,7 @@ $ptLabs = array_values(array_filter(
             <div class="empty-state">
                 <?= icon('history', 28) ?>
                 <strong>No medical history on file</strong>
+                <p>Consultations and treatments completed by your doctor will appear here automatically.</p>
             </div>
         <?php endif; ?>
     </div>
