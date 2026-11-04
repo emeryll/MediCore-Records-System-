@@ -78,16 +78,6 @@ unset($_SESSION['register_error'], $_SESSION['reg_old']);
                 </div>
             <?php endif; ?>
 
-            <div class="id-prefix-pills" aria-label="ID prefix guide">
-                <span><b>P</b> Patient</span>
-                <span class="is-locked" title="Doctor and Staff accounts are created by the Administrator"><b>D / S</b> Created by Admin</span>
-                <?php if ($adminClaimed): ?>
-                    <span class="is-locked" title="The single Administrator account has already been claimed"><b>A</b> Admin <small>(Claimed · Locked)</small></span>
-                <?php else: ?>
-                    <span><b>A</b> Admin <small>(1 only)</small></span>
-                <?php endif; ?>
-            </div>
-
             <form method="post" action="index.php">
                 <?= csrf_field() ?>
                 <input type="hidden" name="action" value="register_account">

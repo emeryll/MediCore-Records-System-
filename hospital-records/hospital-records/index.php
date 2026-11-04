@@ -13,7 +13,7 @@ require __DIR__ . '/includes/booking.php';
  * ------------------------------------------------------------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
-    if (!csrf_valid() && !in_array($action, ['login', 'register_account', 'forgot'], true)) {
+    if (!csrf_valid() && !in_array($action, ['login', 'register_account', 'forgot', 'reset_password'], true)) {
         http_response_code(400);
         exit('Invalid or expired form token. Go back and try again.');
     }
@@ -188,7 +188,143 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('index.php');
 
         case 'forgot':
-            $_SESSION['reset_sent'] = true;
+            $email = strtolower(trim((string) ($_POST['email'] ?? '')));
+            $now   = time();
+
+            // Always respond: "If this email exists, a code was sent."
+            $_SESSION['reset_info']  = 'If this email exists, a code was sent.';
+            $_SESSION['reset_email'] = $email;
+
+            if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                // Rate limit: 5 requests per hour per email (prepared statement)
+                $oneHourAgo = $now - 3600;
+                $limStmt    = db()->prepare('SELECT COUNT(*) AS c FROM password_resets WHERE LOWER(TRIM(email)) = :email AND created_at > :since');
+                $limStmt->execute([':email' => $email, ':since' => $oneHourAgo]);
+                $reqCount = (int) ($limStmt->fetch()['c'] ?? 0);
+
+                if ($reqCount < 5) {
+                    // Check if account exists with this email (prepared statement)
+                    $accStmt = db()->prepare('SELECT id, full_name, email FROM accounts WHERE LOWER(TRIM(email)) = :email LIMIT 1');
+                    $accStmt->execute([':email' => $email]);
+                    $account = $accStmt->fetch();
+
+                    // Fallback to in-memory/seed users if needed
+                    if (!$account && !empty($st['users'])) {
+                        foreach ($st['users'] as $u) {
+                            if (strtolower(trim((string) ($u[1] ?? ''))) === $email) {
+                                $account = ['id' => 0, 'full_name' => (string) ($u[0] ?? 'User'), 'email' => $email];
+                                break;
+                            }
+                        }
+                    }
+
+                    if ($account) {
+                        // Generate 6-digit code, hash it, single-use, expires in 15 minutes
+                        $code      = str_pad((string) random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+                        $codeHash  = password_hash($code, PASSWORD_DEFAULT);
+                        $expiresAt = $now + 900; // 15 minutes
+
+                        $insStmt = db()->prepare('INSERT INTO password_resets (email, code_hash, expires_at, used, created_at) VALUES (:email, :hash, :expires_at, 0, :created_at)');
+                        $insStmt->execute([
+                            ':email'      => $email,
+                            ':hash'       => $codeHash,
+                            ':expires_at' => $expiresAt,
+                            ':created_at' => $now,
+                        ]);
+
+                        require_once __DIR__ . '/includes/mailer.php';
+                        // The user-inputted email ($email) is the recipient receiving the code
+                        send_password_reset_email($email, (string) ($account['full_name'] ?? 'User'), $code);
+                    }
+                }
+            }
+
+            redirect('index.php?auth=login&reset_step=verify');
+
+        case 'reset_password':
+            $email       = strtolower(trim((string) ($_POST['email'] ?? '')));
+            if ($email === '' && !empty($_SESSION['reset_email'])) {
+                $email = strtolower(trim((string) $_SESSION['reset_email']));
+            }
+            $rawCode     = (string) ($_POST['code'] ?? '');
+            $cleanCode   = preg_replace('/[^0-9]/', '', $rawCode);
+            $password    = (string) ($_POST['password'] ?? '');
+            $confirmPass = (string) ($_POST['confirm_password'] ?? '');
+            $now         = time();
+
+            $_SESSION['reset_email'] = $email;
+
+            if ($password !== $confirmPass) {
+                $_SESSION['reset_error'] = 'Passwords do not match. Please re-enter.';
+                redirect('index.php?auth=login&reset_step=verify');
+            }
+            if (strlen($password) < 8) {
+                $_SESSION['reset_error'] = 'Password must be at least 8 characters long.';
+                redirect('index.php?auth=login&reset_step=verify');
+            }
+            if (strlen($cleanCode) !== 6) {
+                $_SESSION['reset_error'] = 'Please enter a valid 6-digit verification code.';
+                redirect('index.php?auth=login&reset_step=verify');
+            }
+
+            // Find unused reset codes for this email (prepared statement)
+            $vStmt = db()->prepare('SELECT id, code_hash, expires_at FROM password_resets WHERE LOWER(TRIM(email)) = :email AND used = 0 ORDER BY id DESC LIMIT 5');
+            $vStmt->execute([':email' => $email]);
+            $candidates = $vStmt->fetchAll();
+
+            if (!$candidates) {
+                // Check if code was already used
+                $chkStmt = db()->prepare('SELECT COUNT(*) AS c FROM password_resets WHERE LOWER(TRIM(email)) = :email');
+                $chkStmt->execute([':email' => $email]);
+                $hadCodes = (int) ($chkStmt->fetch()['c'] ?? 0);
+                if ($hadCodes > 0) {
+                    $_SESSION['reset_error'] = 'This verification code has already been used. Please request a new code.';
+                } else {
+                    $_SESSION['reset_error'] = 'No pending reset request found for this email. Please request a new code.';
+                }
+                redirect('index.php?auth=login&reset_step=verify');
+            }
+
+            $matchedCandidate = null;
+            foreach ($candidates as $cand) {
+                if (password_verify($cleanCode, (string) $cand['code_hash']) || password_verify(trim($rawCode), (string) $cand['code_hash'])) {
+                    $matchedCandidate = $cand;
+                    break;
+                }
+            }
+
+            if ($matchedCandidate === null) {
+                $_SESSION['reset_error'] = 'Incorrect 6-digit code. Please check your email and enter the code carefully.';
+                redirect('index.php?auth=login&reset_step=verify');
+            }
+
+            // Check if the matched code has expired
+            if ($now > (int) $matchedCandidate['expires_at']) {
+                $_SESSION['reset_error'] = 'This 6-digit verification code has expired (valid for 15 minutes). Please request a new one.';
+                redirect('index.php?auth=login&reset_step=verify');
+            }
+
+            // Invalidate code (single-use)
+            $upStmt = db()->prepare('UPDATE password_resets SET used = 1 WHERE LOWER(TRIM(email)) = :email');
+            $upStmt->execute([':email' => $email]);
+
+            // Save new password using password_hash() (prepared statement)
+            $newHash = password_hash($password, PASSWORD_DEFAULT);
+            $accUp   = db()->prepare('UPDATE accounts SET password_hash = :hash WHERE LOWER(TRIM(email)) = :email');
+            $accUp->execute([':hash' => $newHash, ':email' => $email]);
+
+            // Sync with session if user is currently cached
+            if (isset($_SESSION['state']['users']) && is_array($_SESSION['state']['users'])) {
+                foreach ($_SESSION['state']['users'] as &$u) {
+                    if (isset($u[1]) && strtolower(trim((string) $u[1])) === $email) {
+                        $u['password_hash'] = $newHash;
+                    }
+                }
+                unset($u);
+            }
+
+            unset($_SESSION['reset_email'], $_SESSION['reset_info'], $_SESSION['reset_error']);
+            $_SESSION['login_success_msg'] = 'Password updated successfully! You can now sign in with your new password.';
             redirect('index.php?auth=login');
 
         case 'logout':
@@ -956,7 +1092,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect(url(['page' => 'my-appointments', 'detail' => 'new-record', 'patient' => urlencode($idInfo['name'])]));
 
         case 'save_record':
-            $patientParam = trim((string) ($_POST['patient'] ?? ''));
+            $patientParam = urldecode(trim((string) ($_POST['patient'] ?? '')));
+            $patientParam = str_replace('+', ' ', $patientParam);
             $complaint    = trim((string) ($_POST['complaint'] ?? ''));
             $notes        = trim((string) ($_POST['notes'] ?? ''));
             $visitType    = trim((string) ($_POST['visit_type'] ?? 'Consultation'));
@@ -1112,18 +1249,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             unset($appt);
 
-            // Automatically generate consultation bill when finalized so it reflects in Patient portal and Cashier
-            if ($recStatus === 'Completed') {
-                $consultRate = 150.00;
-                $billItems   = [
-                    ['Doctor Consultation Fee (' . $visitType . ')', 1, format_money($consultRate), format_money($consultRate)],
-                ];
-                $totalBill = $consultRate;
-                foreach ($labOrders as $lo) {
-                    $labFee = 65.00;
-                    $billItems[] = [$lo[0] . ' (Diagnostic Lab Order)', 1, format_money($labFee), format_money($labFee)];
-                    $totalBill += $labFee;
+            // Automatically generate or update consultation bill so it directly reflects in Cashier & Patient portal
+            $consultRate = 150.00;
+            $billItems   = [
+                ['Doctor Consultation Fee (' . $visitType . ')', 1, format_money($consultRate), format_money($consultRate)],
+            ];
+            $totalBill = $consultRate;
+
+            // Reflect all ordered lab tests as itemized diagnostic charges
+            foreach ($labOrders as $lo) {
+                $testName = (string) ($lo[0] ?? 'Diagnostic Lab Test');
+                $priority = (string) ($lo[1] ?? 'Routine');
+                $labFee   = match (strtolower($testName)) {
+                    'chest x-ray'              => 110.00,
+                    'electrocardiogram (ecg)'  => 95.00,
+                    'lipid panel'              => 75.00,
+                    'metabolic panel'          => 70.00,
+                    'liver function test'      => 80.00,
+                    'thyroid function'         => 85.00,
+                    default                    => 65.00,
+                };
+                if ($priority === 'Urgent') {
+                    $labFee += 20.00;
+                } elseif ($priority === 'STAT') {
+                    $labFee += 35.00;
                 }
+
+                $priTag = $priority !== 'Routine' ? ' [' . $priority . ']' : '';
+                $billItems[] = [$testName . ' (Laboratory Diagnostic Order' . $priTag . ')', 1, format_money($labFee), format_money($labFee)];
+                $totalBill  += $labFee;
+            }
+
+            // Look for an existing unpaid bill for this patient to update, or create a new one
+            $existingBillIdx = null;
+            foreach ($st['bills'] as $bIdx => $b) {
+                $nb = normalize_bill_row($b, $bIdx);
+                if (matches_patient_identity($idInfo, $nb['patient'], null) && $nb['status'] !== 'Paid') {
+                    // Check if this was a consultation / outpatient bill
+                    foreach ($nb['items'] as $it) {
+                        $desc = (string) ($it[0] ?? '');
+                        if (str_contains($desc, 'Doctor Consultation Fee') || str_contains($desc, 'Outpatient consultation')) {
+                            $existingBillIdx = $bIdx;
+                            break 2;
+                        }
+                    }
+                }
+            }
+
+            if ($existingBillIdx !== null) {
+                // Update existing unpaid bill with new consultation + lab items
+                $oldBill = normalize_bill_row($st['bills'][$existingBillIdx], $existingBillIdx);
+                $st['bills'][$existingBillIdx] = [
+                    $patient,
+                    format_money($totalBill),
+                    'Unpaid',
+                    $oldBill['issued'] ?: date('M d, Y'),
+                    $oldBill['bill_no'],
+                    0.0,
+                    $billItems,
+                ];
+            } else {
+                // Generate a new official bill
                 $billNo = 'BILL-' . str_pad((string) (1001 + count($st['bills'])), 4, '0', STR_PAD_LEFT);
                 array_unshift($st['bills'], [
                     $patient,
@@ -1134,17 +1320,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     0.0,
                     $billItems,
                 ]);
-
-                // Push notification to patient
-                array_unshift($st['notifications'], [
-                    'title'   => 'New visit summary available',
-                    'detail'  => 'Dr. ' . $doctorName . ' completed your consultation summary and prescribed ' . count($prescriptions) . ' medication(s).',
-                    'time'    => 'Just now',
-                    'unread'  => true,
-                    'role'    => 'Patient',
-                    'user_id' => $patientId,
-                ]);
             }
+
+            // Push notification to patient
+            array_unshift($st['notifications'], [
+                'title'   => 'New visit summary & invoice available',
+                'detail'  => 'Dr. ' . $doctorName . ' completed your consultation summary. Bill ' . ($billNo ?? 'issued') . ' (' . format_money($totalBill) . ') is available for settlement with the cashier.',
+                'time'    => 'Just now',
+                'unread'  => true,
+                'role'    => 'Patient',
+                'user_id' => $patientId,
+            ]);
 
             $logAudit($editRecId !== '' ? 'Updated' : 'Created', 'medical_records', '#' . $recId);
             flash($recStatus === 'Draft' ? 'Draft saved for ' . $patient : 'Consultation finalized and reflected on ' . $patient . '\'s account.');

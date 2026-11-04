@@ -310,6 +310,15 @@ function db_init_schema(PDO $pdo, string $driver): void
         store_value LONGTEXT NOT NULL,
         updated_at VARCHAR(40) NOT NULL
     )");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS password_resets (
+        id {$autoInc},
+        email VARCHAR(150) NOT NULL,
+        code_hash VARCHAR(255) NOT NULL,
+        expires_at INT NOT NULL,
+        used INT NOT NULL DEFAULT 0,
+        created_at INT NOT NULL
+    )");
 }
 
 /** Migrate accounts & store from SQLite to MySQL once when MySQL starts up. */

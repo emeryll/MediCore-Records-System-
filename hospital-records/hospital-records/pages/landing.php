@@ -43,11 +43,6 @@ $adminClaimed = db_admin_claimed();
                     <?= button('Sign in with your ID', ['icon' => 'arrow', 'href' => 'index.php?auth=login']) ?>
                     <?= button('Register your ID', ['variant' => 'secondary', 'href' => 'index.php?auth=register']) ?>
                 </div>
-                <div class="landing-trust-strip">
-                    <span><b>P-xxxx</b> Patient ID (issued at consultation)</span>
-                    <span><b>S-xxxx</b> Staff ID</span>
-                    <span><b>D-xxxx</b> Doctor ID</span>
-                </div>
             </div>
 
             <div class="landing-hero-card">
@@ -66,23 +61,6 @@ $adminClaimed = db_admin_claimed();
                         <path class="illu-window" d="M150 92h32v30h-32zM150 144h32v30h-32zM150 196h32v30h-32zM368 92h32v30h-32zM368 144h32v30h-32zM368 196h32v30h-32z"/>
                         <path class="illu-door" d="M250 228h52v45h-52z"/>
                     </svg>
-                </div>
-                <div class="landing-quick-signin">
-                    <p>Role-Based Prefix IDs</p>
-                    <div class="landing-id-buttons">
-                        <a href="index.php?auth=login" class="landing-id-chip">
-                            <strong>P-xxxx</strong>
-                            <span>Patient Portal</span>
-                        </a>
-                        <a href="index.php?auth=login" class="landing-id-chip">
-                            <strong>S-xxxx</strong>
-                            <span>Front Desk Staff</span>
-                        </a>
-                        <a href="index.php?auth=login" class="landing-id-chip">
-                            <strong>D-xxxx</strong>
-                            <span>Doctor Workspace</span>
-                        </a>
-                    </div>
                 </div>
             </div>
         </div>
