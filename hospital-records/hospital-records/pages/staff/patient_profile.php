@@ -47,14 +47,27 @@ $ptBills = array_values(array_filter(
 ?>
 <a class="back-link" href="<?= e(url(['page' => 'patients'])) ?>">← Back to patients</a>
 
+<?php
+$ptStatus = $patient['status'] ?? 'Active';
+?>
 <div class="profile-hero">
     <div class="large-avatar"><?= e($patient[4] ?? initials($patientName)) ?></div>
     <div>
-        <?= badge('Active patient', 'success') ?>
+        <?= badge($ptStatus === 'Active' ? 'Active patient' : 'Disabled patient', $ptStatus === 'Active' ? 'success' : 'danger') ?>
         <h1><?= e($patientName) ?></h1>
         <p>Patient ID <strong><?= e($ptId) ?></strong> · Birthday: <strong><?= e($bdateFormatted) ?></strong> · Age: <strong><?= e($ageText) ?></strong></p>
     </div>
-    <?= button('Edit details', ['variant' => 'secondary', 'icon' => 'edit', 'href' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $patientName, 'modal' => 'Edit patient'])]) ?>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <?= button('Edit details', ['variant' => 'secondary', 'icon' => 'edit', 'href' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $patientName, 'modal' => 'Edit patient'])]) ?>
+        <?= post_button($ptStatus === 'Active' ? 'Disable Patient' : 'Enable Patient', 'toggle_patient', ['patient_id' => $ptId, 'return' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $patientName])], [
+            'variant' => 'secondary',
+            'icon'    => 'shield',
+        ]) ?>
+        <?= post_button('Delete Patient', 'delete_patient', ['patient_id' => $ptId, 'return' => url(['page' => 'patients'])], [
+            'variant' => 'danger',
+            'icon'    => 'trash',
+        ]) ?>
+    </div>
 </div>
 
 <div class="profile-grid">
@@ -64,9 +77,8 @@ $ptBills = array_values(array_filter(
             <div><dt>Birthday</dt><dd><?= e($bdateFormatted) ?></dd></div>
             <div><dt>Age</dt><dd><?= e($ageText) ?></dd></div>
             <div><dt>Sex</dt><dd><?= e($patient[5] ?? 'Not specified') ?></dd></div>
-            <div><dt>Phone</dt><dd><?= e($patient[2]) ?></dd></div>
-            <div><dt>Insurance</dt><dd><?= e($patient[3]) ?></dd></div>
-            <div><dt>Address</dt><dd><?= e($patient[7] ?? 'San Francisco, CA') ?></dd></div>
+            <div><dt>Phone</dt><dd><?= e($patient[2] ?: '—') ?></dd></div>
+            <div><dt>Address</dt><dd><?= e($patient[7] ?: '—') ?></dd></div>
         </dl>
     </div>
 

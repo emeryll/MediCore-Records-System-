@@ -17,7 +17,7 @@ $detailName = $isDoctor ? 'history' : 'profile';
 $linkLabel  = $isDoctor ? 'View history' : 'View profile';
 
 $toolbar = toolbar_open('patients')
-    . search_box('Search by ID, name, birthday, age, phone, or insurance...', 'q', $q)
+    . search_box('Search by ID, name, birthday, age, phone, or address...', 'q', $q)
     . '<div class="toolbar-right">'
     . select_field('', 'filter', ['All patients', 'Recently added'], $filter)
     . filter_button()
@@ -31,12 +31,13 @@ $action = $isDoctor ? '' : button('Register patient', [
 ?>
 <?= page_title('Patients', 'Find patient records, birthday, age, and register new patients.', $action) ?>
 
-<?= table_open(['Patient ID', 'Patient', 'Birthday', 'Age', 'Phone', 'Insurance no.', 'Actions'], $toolbar) ?>
+<?= table_open(['Patient ID', 'Patient', 'Birthday', 'Age', 'Phone', 'Address', 'Status', 'Actions'], $toolbar) ?>
 <?php foreach ($patients as $idx => $p):
-    $link  = url(['page' => 'patients', 'detail' => $detailName, 'patient' => $p[0]]);
-    $ptId  = $p[8] ?? ('P-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT));
-    $bdate = format_birthdate($p[1] ?? '');
-    $age   = patient_age_label($bdate, true);
+    $link     = url(['page' => 'patients', 'detail' => $detailName, 'patient' => $p[0]]);
+    $ptId     = $p[8] ?? ('P-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT));
+    $bdate    = format_birthdate($p[1] ?? '');
+    $age      = patient_age_label($bdate, true);
+    $ptStatus = $p['status'] ?? 'Active';
 ?>
     <tr>
         <td><code><?= e($ptId) ?></code></td>
@@ -48,8 +49,9 @@ $action = $isDoctor ? '' : button('Register patient', [
         </td>
         <td><?= e($bdate) ?></td>
         <td><strong><?= e($age) ?></strong></td>
-        <td><?= e($p[2]) ?></td>
-        <td><code><?= e($p[3]) ?></code></td>
+        <td><?= e($p[2] ?: '—') ?></td>
+        <td style="max-width:240px; font-size:12.5px;"><?= e($p[7] ?: '—') ?></td>
+        <td><?= badge($ptStatus, $ptStatus === 'Active' ? 'success' : 'danger') ?></td>
         <td>
             <div class="row-actions">
                 <a class="text-link" href="<?= e($link) ?>"><?= e($linkLabel) ?> <?= icon('arrow', 14) ?></a>
@@ -57,6 +59,17 @@ $action = $isDoctor ? '' : button('Register patient', [
                     <a class="text-link" style="color:var(--teal-800); font-weight:600;" href="<?= e(url(['page' => 'patients', 'detail' => 'new-record', 'patient' => $p[0]])) ?>">
                         + New record
                     </a>
+                <?php else: ?>
+                    <?= post_button('', 'toggle_patient', ['patient_id' => $ptId], [
+                        'plain' => true,
+                        'class' => 'text-link',
+                        'html'  => $ptStatus === 'Active' ? 'Disable' : 'Enable',
+                    ]) ?>
+                    <?= post_button('', 'delete_patient', ['patient_id' => $ptId], [
+                        'plain' => true,
+                        'class' => 'danger-link',
+                        'html'  => icon('trash', 14) . ' Delete',
+                    ]) ?>
                 <?php endif; ?>
             </div>
         </td>

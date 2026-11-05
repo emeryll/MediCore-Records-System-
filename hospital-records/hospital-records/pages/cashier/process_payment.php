@@ -177,7 +177,7 @@ if ($successOr !== '') {
                     </div>
                 </div>
             <?php else: ?>
-                <form method="post" action="index.php" id="cashier-pay-form" style="padding: 20px 22px; display:grid; gap: 16px;">
+                <form method="post" action="index.php" id="cashier-pay-form" style="padding: 20px 22px; display:grid; gap: 16px;" onsubmit="return confirm('Are you sure about this action?');">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="process_payment">
                     <input type="hidden" name="bill_no" value="<?= e($selectedBill['bill_no']) ?>">

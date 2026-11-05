@@ -56,15 +56,8 @@ $myAge  = patient_age_label($myDob, false, '—');
                 </label>
             </div>
 
-            <div class="form-grid">
-                <label class="field">
-                    <span class="field-label">Insurance number (read-only)</span>
-                    <span class="input-wrap"><input type="text" value="<?= e($patient[3]) ?>" disabled></span>
-                </label>
-                <?= field('Phone number', 'phone', '(000) 000-0000', 'text', $patient[2]) ?>
-            </div>
-
-            <?= field('Home address', 'address', 'Street, City, State', 'text', $patient[7] ?? '') ?>
+            <?= field('Phone number', 'phone', '09XXXXXXXX', 'text', $patient[2] !== '—' ? $patient[2] : '') ?>
+            <?= field('Home address', 'address', 'Street, Barangay, City, Province, Country, ZIP', 'text', $patient[7] !== '—' ? $patient[7] : '') ?>
 
             <div class="pt-form-foot">
                 <?= button('Save contact details', ['type' => 'submit']) ?>

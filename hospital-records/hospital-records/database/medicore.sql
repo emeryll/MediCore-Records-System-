@@ -76,6 +76,14 @@ CREATE TABLE patients (
         sex VARCHAR(30) NOT NULL DEFAULT 'Not specified',
         blood_type VARCHAR(30) NOT NULL DEFAULT 'Not specified',
         address VARCHAR(255) NOT NULL DEFAULT '—',
+        country VARCHAR(100) NOT NULL DEFAULT 'Philippines',
+        province VARCHAR(100) NOT NULL DEFAULT '',
+        city VARCHAR(100) NOT NULL DEFAULT '',
+        barangay VARCHAR(100) NOT NULL DEFAULT '',
+        street VARCHAR(150) NOT NULL DEFAULT '',
+        postal_code VARCHAR(20) NOT NULL DEFAULT '',
+        phone_verified INT NOT NULL DEFAULT 0,
+        status VARCHAR(30) NOT NULL DEFAULT 'Active',
         created_at VARCHAR(40) NOT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -109,17 +117,6 @@ CREATE TABLE rooms (
 INSERT INTO `rooms` (`id`, `room_number`, `ward`, `status`, `patient_name`) VALUES
   (60, 'Room 101', 'General Ward', 'Available', '\342\200\224'),
   (61, 'Room 102', 'General Ward', 'Occupied', 'Meryll Joy Evangelista');
-
--- -------------------------------------------------------------
--- Table structure for `medications`
--- -------------------------------------------------------------
-CREATE TABLE medications (
-        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY AUTO_INCREMENT,
-        name VARCHAR(120) NOT NULL UNIQUE,
-        category VARCHAR(80) NOT NULL DEFAULT 'General',
-        strength VARCHAR(60) NOT NULL DEFAULT '',
-        stock VARCHAR(60) NOT NULL DEFAULT '0 units'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------------------------------------------
 -- Table structure for `admissions`
@@ -332,6 +329,21 @@ INSERT INTO `app_store` (`store_key`, `store_value`, `updated_at`) VALUES
   ('roles', '[["Doctor","Clinical records and appointments",0,["View patients","Edit patients","View medical records","Edit medical records","Manage appointments","Manage admissions","Manage billing","View lab results"],"patient"],["Front desk","Registration and scheduling",0,["View patients","Edit patients","Manage appointments","Manage admissions","Manage billing"],"users"],["Patient","Patient portal access for appointments, records, and billing",0,["View medical records","Manage appointments","View lab results"],"patient"]]', '2026-10-29 07:52:14'),
   ('notifications', '{"0":{"title":"Payment receipt issued (OR-1002)","detail":"Official receipt OR-1002 for $150.00 received via Cash for Bill #BILL-1002 (Balance: $0.00).","time":"Just now","unread":true,"role":"Patient","user_id":"P-1001"},"1":{"title":"Payment receipt issued (OR-1001)","detail":"Official receipt OR-1001 for $150.00 received via Cash for Bill #BILL-1003 (Balance: $0.00).","time":"Just now","unread":true,"role":"Patient","user_id":"P-1001"},"2":{"title":"New visit summary available","detail":"Dr. Dr. Meryll Silvano Evangelista completed your consultation summary and prescribed 1 medication(s).","time":"Just now","unread":true,"role":"Patient","user_id":"P-1001"},"3":{"title":"New visit summary available","detail":"Dr. Dr. Meryll Silvano Evangelista completed your consultation summary and prescribed 0 medication(s).","time":"Just now","unread":true,"role":"Patient","user_id":"P-1001"},"Admin":[],"Staff":[],"Doctor":[],"Patient":[]}', '2026-11-04 05:55:15'),
   ('archive', '[]', '2026-10-29 07:52:14');
+
+-- -------------------------------------------------------------
+-- Table structure for `phone_otps`
+-- -------------------------------------------------------------
+CREATE TABLE phone_otps (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY AUTO_INCREMENT,
+        phone VARCHAR(50) NOT NULL,
+        patient_id VARCHAR(20) NOT NULL DEFAULT '',
+        code_hash VARCHAR(255) NOT NULL,
+        plain_code VARCHAR(10) NOT NULL DEFAULT '',
+        purpose VARCHAR(50) NOT NULL DEFAULT 'verification',
+        expires_at INT NOT NULL,
+        used INT NOT NULL DEFAULT 0,
+        created_at INT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------------------------------------------
 -- Table structure for `password_resets`

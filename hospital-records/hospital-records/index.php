@@ -13,6 +13,97 @@ require __DIR__ . '/includes/booking.php';
  * ------------------------------------------------------------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    // AJAX Endpoints (Phone OTP & Patient Lookup)
+    if ($action === 'ajax_send_phone_otp') {
+        header('Content-Type: application/json; charset=utf-8');
+        $phone     = trim((string) ($_POST['phone'] ?? ''));
+        $patientId = trim((string) ($_POST['patient_id'] ?? ''));
+        $purpose   = trim((string) ($_POST['purpose'] ?? 'verification'));
+        $res       = db_generate_phone_otp($phone, $patientId, $purpose);
+        if (!empty($res['ok'])) {
+            $res['simulated_message'] = '💬 Simulated SMS to ' . $res['phone'] . ': Your MediCore verification code is ' . $res['code'] . ' (valid for 10 minutes).';
+        }
+        echo json_encode($res);
+        exit;
+    }
+
+    if ($action === 'ajax_verify_phone_otp') {
+        header('Content-Type: application/json; charset=utf-8');
+        $phone   = trim((string) ($_POST['phone'] ?? ''));
+        $code    = trim((string) ($_POST['code'] ?? ''));
+        $purpose = trim((string) ($_POST['purpose'] ?? 'verification'));
+        $res     = db_verify_phone_otp($phone, $code, $purpose);
+        echo json_encode($res);
+        exit;
+    }
+
+    if ($action === 'ajax_lookup_patient') {
+        header('Content-Type: application/json; charset=utf-8');
+        $patientId = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
+        if ($patientId === '') {
+            echo json_encode(['ok' => false, 'message' => 'Please enter a Patient ID.']);
+            exit;
+        }
+
+        // 1. Check if patient account is already claimed
+        $chkAcc = db()->prepare('SELECT id, username FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
+        $chkAcc->execute([':uid' => $patientId]);
+        if ($chkAcc->fetch(PDO::FETCH_ASSOC)) {
+            echo json_encode([
+                'ok' => false,
+                'already_registered' => true,
+                'message' => 'An active account already exists for Patient ID ' . $patientId . '. Please sign in with your credentials.',
+            ]);
+            exit;
+        }
+
+        // 2. Look up patient in patients table or state
+        $p = db_find_patient_by_id($patientId);
+        if (!$p) {
+            echo json_encode([
+                'ok' => false,
+                'not_found' => true,
+                'message' => 'No patient registration found for Patient ID ' . $patientId . '. Please have Front Desk Staff register you first.',
+            ]);
+            exit;
+        }
+
+        $rawPhone   = $p['phone'] ?? '';
+        $cleanPhone = preg_replace('/[^0-9+]/', '', $rawPhone);
+        $len        = strlen($cleanPhone);
+        if ($len > 6) {
+            $maskedPhone = substr($cleanPhone, 0, 4) . ' ••• •' . substr($cleanPhone, -3);
+        } else {
+            $maskedPhone = $cleanPhone;
+        }
+
+        // Generate and send OTP to patient phone
+        $otpRes = db_generate_phone_otp($cleanPhone, $patientId, 'account_creation');
+
+        echo json_encode([
+            'ok'      => true,
+            'patient' => [
+                'patient_id'   => $p['patient_id'],
+                'full_name'    => $p['full_name'],
+                'birthdate'    => $p['birthdate'],
+                'phone'        => $cleanPhone,
+                'phone_masked' => $maskedPhone,
+                'address'      => $p['address'],
+                'country'      => $p['country'] ?: 'Philippines',
+                'province'     => $p['province'] ?: '—',
+                'city'         => $p['city'] ?: '—',
+                'barangay'     => $p['barangay'] ?: '—',
+                'street'       => $p['street'] ?: '—',
+                'postal_code'  => $p['postal_code'] ?: '—',
+                'email'        => $p['email'] ?? '',
+            ],
+            'otp_code'          => $otpRes['code'] ?? '',
+            'simulated_message' => '💬 Simulated SMS to ' . $maskedPhone . ': Your MediCore verification code is ' . ($otpRes['code'] ?? '') . ' (valid for 10 minutes).',
+        ]);
+        exit;
+    }
+
     if (!csrf_valid() && !in_array($action, ['login', 'register_account', 'forgot', 'reset_password'], true)) {
         http_response_code(400);
         exit('Invalid or expired form token. Go back and try again.');
@@ -36,26 +127,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     switch ($action) {
         case 'register_account':
-            $userId    = strtoupper(trim((string) ($_POST['user_id'] ?? '')));
-            $first     = trim((string) ($_POST['first_name'] ?? ''));
-            $last      = trim((string) ($_POST['last_name'] ?? ''));
-            $birthdate = trim((string) ($_POST['birthdate'] ?? ''));
-            $username  = strtolower(trim((string) ($_POST['username'] ?? '')));
-            $email     = strtolower(trim((string) ($_POST['email'] ?? '')));
-            $password  = (string) ($_POST['password'] ?? '');
-            $confirm   = (string) ($_POST['confirm_password'] ?? '');
-            $dept      = trim((string) ($_POST['department'] ?? ''));
-            $spec      = trim((string) ($_POST['specialty'] ?? ''));
+            $userId   = strtoupper(trim((string) ($_POST['user_id'] ?? '')));
+            $password = (string) ($_POST['password'] ?? '');
+            $confirm  = (string) ($_POST['confirm_password'] ?? '');
+            $otpCode  = trim((string) ($_POST['otp_code'] ?? ''));
 
             $_SESSION['reg_old'] = [
-                'user_id'    => $userId,
-                'first_name' => $first,
-                'last_name'  => $last,
-                'birthdate'  => $birthdate,
-                'username'   => $username,
-                'email'      => $email,
-                'department' => $dept,
-                'specialty'  => $spec,
+                'user_id' => $userId,
             ];
 
             if ($password !== $confirm) {
@@ -63,16 +141,82 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect('index.php?auth=register');
             }
 
-            $fullName = trim($first . ' ' . $last);
+            if (mb_strlen($password) < 8) {
+                $_SESSION['register_error'] = 'Password must be at least 8 characters long.';
+                redirect('index.php?auth=register');
+            }
+
+            // PATIENT SELF-ACTIVATION (P-ID):
+            if (str_starts_with($userId, 'P')) {
+                $pt = db_find_patient_by_id($userId);
+                if (!$pt) {
+                    $_SESSION['register_error'] = 'No patient record found for Patient ID ' . $userId . '. Please check with Front Desk Staff.';
+                    redirect('index.php?auth=register');
+                }
+
+                // Verify OTP
+                $ptPhone = preg_replace('/[^0-9+]/', '', (string) ($pt['phone'] ?? ''));
+                $vRes = db_verify_phone_otp($ptPhone, $otpCode, 'account_creation');
+                if (!$vRes['ok']) {
+                    $vRes2 = db_verify_phone_otp($ptPhone, $otpCode, 'verification');
+                    if (!$vRes2['ok']) {
+                        $_SESSION['register_error'] = $vRes['error'] ?? 'Invalid or expired 6-digit verification code.';
+                        redirect('index.php?auth=register');
+                    }
+                }
+
+                $fullName  = trim((string) ($pt['full_name'] ?? 'Patient'));
+                // USERNAME IS THE NAME THEY INPUTTED DURING REGISTRATION
+                $username  = $fullName;
+                $birthdate = trim((string) ($pt['birthdate'] ?? ''));
+                $reqEmail = trim((string) ($_POST['email'] ?? ''));
+                $email    = ($reqEmail !== '') ? $reqEmail : ((!empty($pt['email'])) ? $pt['email'] : (strtolower($userId) . '@patient.medicore.local'));
+
+                $res = db_create_account([
+                    'user_id'   => $userId,
+                    'username'  => $username,
+                    'email'     => $email,
+                    'password'  => $password,
+                    'full_name' => $fullName,
+                    'birthdate' => $birthdate,
+                ]);
+
+                if (isset($res['error'])) {
+                    $_SESSION['register_error'] = $res['error'];
+                    redirect('index.php?auth=register');
+                }
+
+                $acc = $res['account'];
+                unset($_SESSION['reg_old'], $_SESSION['register_error']);
+
+                // Auto sign-in to Patient Portal
+                $_SESSION['user_id']      = $acc['user_id'];
+                $_SESSION['role']         = 'Patient';
+                $_SESSION['user_name']    = $fullName;
+                $_SESSION['auth_account'] = $acc;
+                flash('Welcome to your MediCore Patient Portal, ' . $fullName . '! Your account is now active.');
+                redirect('index.php');
+            }
+
+            // ADMIN ONE-TIME REGISTRATION (A-ID):
+            $first     = trim((string) ($_POST['first_name'] ?? ''));
+            $last      = trim((string) ($_POST['last_name'] ?? ''));
+            $birthdate = trim((string) ($_POST['birthdate'] ?? ''));
+            $username  = strtolower(trim((string) ($_POST['username'] ?? '')));
+            $email     = strtolower(trim((string) ($_POST['email'] ?? '')));
+            $dept      = trim((string) ($_POST['department'] ?? ''));
+            $spec      = trim((string) ($_POST['specialty'] ?? ''));
+            $fullName  = trim($first . ' ' . $last);
+
             $res = db_create_account([
-                'user_id'   => $userId,
-                'username'  => $username,
-                'email'     => $email,
-                'password'  => $password,
-                'full_name' => $fullName,
-                'birthdate' => $birthdate,
-                'department'=> $dept,
-                'specialty' => $spec,
+                'user_id'    => $userId,
+                'username'   => $username,
+                'email'      => $email,
+                'password'   => $password,
+                'full_name'  => $fullName,
+                'birthdate'  => $birthdate,
+                'department' => $dept,
+                'specialty'  => $spec,
             ]);
 
             if (isset($res['error'])) {
@@ -82,6 +226,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $acc = $res['account'];
             unset($_SESSION['reg_old'], $_SESSION['register_error']);
+
+            $_SESSION['user_id']      = $acc['user_id'];
+            $_SESSION['role']         = $acc['role'];
+            $_SESSION['user_name']    = $acc['full_name'];
+            $_SESSION['auth_account'] = $acc;
+            flash('Administrator account created successfully! Welcome to MediCore.');
+            redirect('index.php');
 
             // Reload state from DB so $st['users'] includes the newly created account
             $st = db_load_state();
@@ -136,21 +287,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('index.php');
 
         case 'login':
-            $userId    = strtoupper(trim((string) ($_POST['user_id'] ?? '')));
-            $username  = strtolower(trim((string) ($_POST['username'] ?? '')));
-            $password  = (string) ($_POST['password'] ?? '');
-            $birthdate = trim((string) ($_POST['birthdate'] ?? ''));
-            $_SESSION['login_user_id']  = $userId;
-            $_SESSION['login_username'] = $username;
+            $userId     = strtoupper(trim((string) ($_POST['user_id'] ?? '')));
+            $identifier = trim((string) ($_POST['login_identifier'] ?? ($_POST['phone'] ?? ($_POST['email'] ?? ($_POST['username'] ?? '')))));
+            $password   = (string) ($_POST['password'] ?? '');
 
-            $verify = db_verify_login($userId, $username, $password, $birthdate);
+            // Log attempt for immediate diagnosis
+            @file_put_contents(__DIR__ . '/login_debug.log', date('Y-m-d H:i:s') . " | uid: " . var_export($userId, true) . " | ident: " . var_export($identifier, true) . " | pass: " . var_export($password, true) . "\n", FILE_APPEND);
+
+            $_SESSION['login_user_id']    = $userId;
+            $_SESSION['login_identifier'] = $identifier;
+            $_SESSION['login_phone']      = $identifier;
+
+            $verify = db_verify_login($userId, $identifier, $password);
             if (isset($verify['error'])) {
                 $_SESSION['login_error'] = $verify['error'];
                 redirect('index.php?auth=login');
             }
 
             $acc = $verify['account'];
-            unset($_SESSION['login_user_id'], $_SESSION['login_username']);
+            unset($_SESSION['login_user_id'], $_SESSION['login_identifier'], $_SESSION['login_phone'], $_SESSION['login_error']);
             $_SESSION['role']      = (string) $acc['role'];
             $_SESSION['user_id']   = (string) $acc['user_id'];
             $_SESSION['user_name'] = $acc['role'] === 'Doctor' && !str_starts_with((string) $acc['full_name'], 'Dr.')
@@ -158,7 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : (string) $acc['full_name'];
 
             if ($acc['role'] === 'Patient') {
-                $fmtBdate = format_birthdate((string) ($acc['birthdate'] ?? $birthdate));
+                $fmtBdate = format_birthdate((string) ($acc['birthdate'] ?? ''));
                 $ptExists = false;
                 foreach ($st['patients'] as &$pt) {
                     if (strcasecmp((string) ($pt[8] ?? ''), (string) $acc['user_id']) === 0 || strcasecmp($pt[0], (string) $acc['full_name']) === 0) {
@@ -175,84 +330,109 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     array_unshift($st['patients'], [
                         (string) $acc['full_name'],
                         $fmtBdate,
+                        $acc['phone'] ?: '—',
                         '—',
-                        'HIN-' . rand(100, 999) . '-' . rand(100, 999),
                         initials((string) $acc['full_name'], 2),
+                        $acc['sex'] ?: 'Not specified',
                         'Not specified',
-                        'Not specified',
-                        '—',
+                        $acc['address'] ?: '—',
                         (string) $acc['user_id'],
                     ]);
                 }
             }
+
+            $logAudit('Sign in', 'accounts', '#' . $acc['user_id']);
             redirect('index.php');
 
         case 'forgot':
-            $email = strtolower(trim((string) ($_POST['email'] ?? '')));
-            $now   = time();
+            $userId      = trim((string) ($_POST['user_id'] ?? ''));
+            $resetMethod = (string) ($_POST['reset_method'] ?? 'phone');
+            $phone       = trim((string) ($_POST['phone'] ?? ''));
+            $email       = strtolower(trim((string) ($_POST['email'] ?? '')));
+            $cleanPhone  = preg_replace('/[^0-9]/', '', $phone);
 
-            // Always respond: "If this email exists, a code was sent."
-            $_SESSION['reset_info']  = 'If this email exists, a code was sent.';
-            $_SESSION['reset_email'] = $email;
+            $_SESSION['reset_user_id'] = $userId;
+            $_SESSION['reset_method']  = $resetMethod;
+            $_SESSION['reset_phone']   = $phone;
+            $_SESSION['reset_email']   = $email;
 
-            if ($email !== '' && filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                // Rate limit: 5 requests per hour per email (prepared statement)
-                $oneHourAgo = $now - 3600;
-                $limStmt    = db()->prepare('SELECT COUNT(*) AS c FROM password_resets WHERE LOWER(TRIM(email)) = :email AND created_at > :since');
-                $limStmt->execute([':email' => $email, ':since' => $oneHourAgo]);
-                $reqCount = (int) ($limStmt->fetch()['c'] ?? 0);
+            if ($userId === '') {
+                $_SESSION['reset_error'] = 'Please enter your assigned User ID.';
+                redirect('index.php?auth=login&forgot=1');
+            }
 
-                if ($reqCount < 5) {
-                    // Check if account exists with this email (prepared statement)
-                    $accStmt = db()->prepare('SELECT id, full_name, email FROM accounts WHERE LOWER(TRIM(email)) = :email LIMIT 1');
-                    $accStmt->execute([':email' => $email]);
-                    $account = $accStmt->fetch();
+            $acc = db_find_account_by_id($userId);
+            if (!$acc) {
+                $_SESSION['reset_error'] = 'No account found with ID ' . $userId . '.';
+                redirect('index.php?auth=login&forgot=1');
+            }
 
-                    // Fallback to in-memory/seed users if needed
-                    if (!$account && !empty($st['users'])) {
-                        foreach ($st['users'] as $u) {
-                            if (strtolower(trim((string) ($u[1] ?? ''))) === $email) {
-                                $account = ['id' => 0, 'full_name' => (string) ($u[0] ?? 'User'), 'email' => $email];
-                                break;
-                            }
-                        }
-                    }
+            if ($resetMethod === 'email') {
+                if ($email === '') {
+                    $_SESSION['reset_error'] = 'Please enter your registered email address.';
+                    redirect('index.php?auth=login&forgot=1');
+                }
+                $accEmail = strtolower(trim((string) ($acc['email'] ?? '')));
+                if ($accEmail === '' || $accEmail !== $email) {
+                    $_SESSION['reset_error'] = 'The email address does not match our records for ID ' . $userId . '.';
+                    redirect('index.php?auth=login&forgot=1');
+                }
 
-                    if ($account) {
-                        // Generate 6-digit code, hash it, single-use, expires in 15 minutes
-                        $code      = str_pad((string) random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
-                        $codeHash  = password_hash($code, PASSWORD_DEFAULT);
-                        $expiresAt = $now + 900; // 15 minutes
+                $otpRes = db_generate_phone_otp($email, (string) $acc['user_id'], 'password_reset');
+                $code = $otpRes['code'] ?? '';
+                $maskedEmail = preg_replace('/(?<=.{2}).(?=.*@)/u', '*', $email);
 
-                        $insStmt = db()->prepare('INSERT INTO password_resets (email, code_hash, expires_at, used, created_at) VALUES (:email, :hash, :expires_at, 0, :created_at)');
-                        $insStmt->execute([
-                            ':email'      => $email,
-                            ':hash'       => $codeHash,
-                            ':expires_at' => $expiresAt,
-                            ':created_at' => $now,
-                        ]);
+                $_SESSION['reset_info']           = 'A 6-digit verification code has been sent to ' . $maskedEmail . '.';
+                $_SESSION['reset_sms_sim']        = '✉️ Simulated Email to ' . $email . ': Your MediCore verification code is ' . $code . ' (valid for 15 minutes).';
+                $_SESSION['reset_otp_code']       = $code;
+                $_SESSION['reset_verified_phone'] = $email;
+                $_SESSION['reset_target_uid']     = (string) $acc['user_id'];
+            } else {
+                if ($cleanPhone === '') {
+                    $_SESSION['reset_error'] = 'Please enter your registered mobile number.';
+                    redirect('index.php?auth=login&forgot=1');
+                }
 
-                        require_once __DIR__ . '/includes/mailer.php';
-                        // The user-inputted email ($email) is the recipient receiving the code
-                        send_password_reset_email($email, (string) ($account['full_name'] ?? 'User'), $code);
+                $accPhone = preg_replace('/[^0-9]/', '', (string) ($acc['phone'] ?? ''));
+                if ($accPhone === '' && $acc['role'] === 'Patient') {
+                    $pt = db_find_patient_by_id((string) $acc['user_id']);
+                    if ($pt) {
+                        $accPhone = preg_replace('/[^0-9]/', '', (string) ($pt['phone'] ?? ''));
                     }
                 }
+
+                $phoneMatch = ($accPhone !== '' && (
+                    $cleanPhone === $accPhone ||
+                    substr($cleanPhone, -10) === substr($accPhone, -10) ||
+                    substr($cleanPhone, -9) === substr($accPhone, -9)
+                ));
+
+                if (!$phoneMatch) {
+                    $_SESSION['reset_error'] = 'The mobile number does not match the registered phone for ID ' . $userId . '.';
+                    redirect('index.php?auth=login&forgot=1');
+                }
+
+                $otpRes = db_generate_phone_otp($cleanPhone, (string) $acc['user_id'], 'password_reset');
+                $code = $otpRes['code'] ?? '';
+                $maskedPhone = strlen($cleanPhone) > 6 
+                    ? substr($cleanPhone, 0, 4) . ' ••• •' . substr($cleanPhone, -3)
+                    : $cleanPhone;
+
+                $_SESSION['reset_info']           = 'A 6-digit verification code has been sent to ' . $maskedPhone . '.';
+                $_SESSION['reset_sms_sim']        = '💬 Simulated SMS to ' . $maskedPhone . ': Your MediCore verification code is ' . $code . ' (valid for 15 minutes).';
+                $_SESSION['reset_otp_code']       = $code;
+                $_SESSION['reset_verified_phone'] = $cleanPhone;
+                $_SESSION['reset_target_uid']     = (string) $acc['user_id'];
             }
 
             redirect('index.php?auth=login&reset_step=verify');
 
         case 'reset_password':
-            $email       = strtolower(trim((string) ($_POST['email'] ?? '')));
-            if ($email === '' && !empty($_SESSION['reset_email'])) {
-                $email = strtolower(trim((string) $_SESSION['reset_email']));
-            }
-            $rawCode     = (string) ($_POST['code'] ?? '');
-            $cleanCode   = preg_replace('/[^0-9]/', '', $rawCode);
+            $userId      = (string) ($_SESSION['reset_target_uid'] ?? '');
+            $identifier  = (string) ($_SESSION['reset_verified_phone'] ?? '');
+            $code        = trim((string) ($_POST['code'] ?? ''));
             $password    = (string) ($_POST['password'] ?? '');
             $confirmPass = (string) ($_POST['confirm_password'] ?? '');
-            $now         = time();
-
-            $_SESSION['reset_email'] = $email;
 
             if ($password !== $confirmPass) {
                 $_SESSION['reset_error'] = 'Passwords do not match. Please re-enter.';
@@ -262,69 +442,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['reset_error'] = 'Password must be at least 8 characters long.';
                 redirect('index.php?auth=login&reset_step=verify');
             }
-            if (strlen($cleanCode) !== 6) {
-                $_SESSION['reset_error'] = 'Please enter a valid 6-digit verification code.';
+            if (strlen($code) !== 6) {
+                $_SESSION['reset_error'] = 'Please enter the 6-digit verification code.';
                 redirect('index.php?auth=login&reset_step=verify');
             }
 
-            // Find unused reset codes for this email (prepared statement)
-            $vStmt = db()->prepare('SELECT id, code_hash, expires_at FROM password_resets WHERE LOWER(TRIM(email)) = :email AND used = 0 ORDER BY id DESC LIMIT 5');
-            $vStmt->execute([':email' => $email]);
-            $candidates = $vStmt->fetchAll();
-
-            if (!$candidates) {
-                // Check if code was already used
-                $chkStmt = db()->prepare('SELECT COUNT(*) AS c FROM password_resets WHERE LOWER(TRIM(email)) = :email');
-                $chkStmt->execute([':email' => $email]);
-                $hadCodes = (int) ($chkStmt->fetch()['c'] ?? 0);
-                if ($hadCodes > 0) {
-                    $_SESSION['reset_error'] = 'This verification code has already been used. Please request a new code.';
-                } else {
-                    $_SESSION['reset_error'] = 'No pending reset request found for this email. Please request a new code.';
-                }
+            $vRes = db_verify_phone_otp($identifier, $code, 'password_reset');
+            if (empty($vRes['ok'])) {
+                $_SESSION['reset_error'] = $vRes['error'] ?? 'Incorrect or expired verification code.';
                 redirect('index.php?auth=login&reset_step=verify');
             }
 
-            $matchedCandidate = null;
-            foreach ($candidates as $cand) {
-                if (password_verify($cleanCode, (string) $cand['code_hash']) || password_verify(trim($rawCode), (string) $cand['code_hash'])) {
-                    $matchedCandidate = $cand;
-                    break;
-                }
-            }
+            $pdo = db();
+            $hash = password_hash($password, PASSWORD_DEFAULT);
+            $up = $pdo->prepare('UPDATE accounts SET password_hash = :pw WHERE UPPER(user_id) = :uid');
+            $up->execute([':pw' => $hash, ':uid' => strtoupper($userId)]);
 
-            if ($matchedCandidate === null) {
-                $_SESSION['reset_error'] = 'Incorrect 6-digit code. Please check your email and enter the code carefully.';
-                redirect('index.php?auth=login&reset_step=verify');
-            }
-
-            // Check if the matched code has expired
-            if ($now > (int) $matchedCandidate['expires_at']) {
-                $_SESSION['reset_error'] = 'This 6-digit verification code has expired (valid for 15 minutes). Please request a new one.';
-                redirect('index.php?auth=login&reset_step=verify');
-            }
-
-            // Invalidate code (single-use)
-            $upStmt = db()->prepare('UPDATE password_resets SET used = 1 WHERE LOWER(TRIM(email)) = :email');
-            $upStmt->execute([':email' => $email]);
-
-            // Save new password using password_hash() (prepared statement)
-            $newHash = password_hash($password, PASSWORD_DEFAULT);
-            $accUp   = db()->prepare('UPDATE accounts SET password_hash = :hash WHERE LOWER(TRIM(email)) = :email');
-            $accUp->execute([':hash' => $newHash, ':email' => $email]);
-
-            // Sync with session if user is currently cached
-            if (isset($_SESSION['state']['users']) && is_array($_SESSION['state']['users'])) {
-                foreach ($_SESSION['state']['users'] as &$u) {
-                    if (isset($u[1]) && strtolower(trim((string) $u[1])) === $email) {
-                        $u['password_hash'] = $newHash;
-                    }
-                }
-                unset($u);
-            }
-
-            unset($_SESSION['reset_email'], $_SESSION['reset_info'], $_SESSION['reset_error']);
-            $_SESSION['login_success_msg'] = 'Password updated successfully! You can now sign in with your new password.';
+            unset($_SESSION['reset_target_uid'], $_SESSION['reset_verified_phone'], $_SESSION['reset_sms_sim'], $_SESSION['reset_info'], $_SESSION['reset_otp_code'], $_SESSION['reset_user_id'], $_SESSION['reset_phone'], $_SESSION['reset_email'], $_SESSION['reset_method']);
+            $_SESSION['login_success_msg'] = 'Password updated successfully! Sign in with your ID, mobile number or email, and new password.';
             redirect('index.php?auth=login');
 
         case 'logout':
@@ -349,37 +484,132 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             unset($u);
             redirect($return);
 
+        case 'update_my_profile':
+            $currentUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($currentUid === '') {
+                redirect('index.php?auth=login');
+            }
+
+            $phone         = trim((string) ($_POST['phone'] ?? ''));
+            $cleanPhone    = preg_replace('/[^0-9]/', '', $phone);
+            $email         = trim((string) ($_POST['email'] ?? ''));
+            $sex           = trim((string) ($_POST['sex'] ?? ''));
+            $country       = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province      = trim((string) ($_POST['province'] ?? ''));
+            $city          = trim((string) ($_POST['city'] ?? ''));
+            $barangay      = trim((string) ($_POST['barangay'] ?? ''));
+            $street        = trim((string) ($_POST['street'] ?? ''));
+            $postal        = trim((string) ($_POST['postal_code'] ?? ''));
+            $newPassword   = (string) ($_POST['new_password'] ?? '');
+            $phoneVerified = (int) ($_POST['phone_verified'] ?? 0);
+
+            $pdo  = db();
+            $stmt = $pdo->prepare('SELECT * FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
+            $stmt->execute([':uid' => strtoupper($currentUid)]);
+            $currAcc = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$currAcc) {
+                flash('Account not found.');
+                redirect('index.php?page=profile');
+            }
+
+            $origPhone = preg_replace('/[^0-9]/', '', (string) ($currAcc['phone'] ?? ''));
+            if ($cleanPhone !== $origPhone && $phoneVerified !== 1) {
+                flash('Please verify your new mobile number with the SMS OTP code before saving.');
+                redirect('index.php?page=profile');
+            }
+
+            $addrParts     = array_filter([$street, $barangay, $city, $province, $country, $postal]);
+            $formattedAddr = implode(', ', $addrParts) ?: '—';
+
+            $sql = 'UPDATE accounts SET phone = :ph, email = :em, sex = :sx, address = :ad, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc, phone_verified = 1';
+            $params = [
+                ':ph'  => $phone,
+                ':em'  => $email ?: ($currAcc['email'] ?? ''),
+                ':sx'  => ($sex !== '' && $sex !== 'Select sex') ? $sex : ($currAcc['sex'] ?? 'Not specified'),
+                ':ad'  => $formattedAddr,
+                ':co'  => $country,
+                ':pr'  => $province,
+                ':ci'  => $city,
+                ':bg'  => $barangay,
+                ':st'  => $street,
+                ':pc'  => $postal,
+                ':uid' => strtoupper($currentUid),
+            ];
+
+            if ($role === 'Doctor') {
+                $sql .= ', department = :dp, specialty = :sp, license_number = :lc';
+                $params[':dp'] = trim((string) ($_POST['department'] ?? ''));
+                $params[':sp'] = trim((string) ($_POST['specialty'] ?? ''));
+                $params[':lc'] = trim((string) ($_POST['license'] ?? ''));
+            }
+
+            if ($newPassword !== '') {
+                if (strlen($newPassword) < 8) {
+                    flash('New password must be at least 8 characters long.');
+                    redirect('index.php?page=profile');
+                }
+                $sql .= ', password_hash = :pw';
+                $params[':pw'] = password_hash($newPassword, PASSWORD_DEFAULT);
+            }
+
+            $sql .= ' WHERE UPPER(user_id) = :uid';
+            $upStmt = $pdo->prepare($sql);
+            $upStmt->execute($params);
+
+            if ($currAcc['role'] === 'Patient') {
+                $upPt = $pdo->prepare('UPDATE patients SET phone = :ph, email = :em, sex = :sx, address = :ad, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc, phone_verified = 1 WHERE UPPER(patient_id) = :pid');
+                $upPt->execute([
+                    ':ph'  => $phone,
+                    ':em'  => $email ?: ($currAcc['email'] ?? ''),
+                    ':sx'  => ($sex !== '' && $sex !== 'Select sex') ? $sex : ($currAcc['sex'] ?? 'Not specified'),
+                    ':ad'  => $formattedAddr,
+                    ':co'  => $country,
+                    ':pr'  => $province,
+                    ':ci'  => $city,
+                    ':bg'  => $barangay,
+                    ':st'  => $street,
+                    ':pc'  => $postal,
+                    ':pid' => strtoupper($currentUid),
+                ]);
+            }
+
+            $st = db_load_state();
+            $_SESSION['state'] = &$st;
+            $logAudit('Updated profile', 'accounts', '#' . $currentUid);
+            flash('Profile details updated successfully.');
+            redirect('index.php?page=profile');
+
         case 'save_user':
-            $orig      = trim((string) ($_POST['orig'] ?? ''));
+            $origId    = trim((string) ($_POST['orig_id'] ?? ($_POST['orig'] ?? '')));
             $first     = trim((string) ($_POST['first_name'] ?? ''));
             $middle    = trim((string) ($_POST['middle_name'] ?? ''));
             $last      = trim((string) ($_POST['last_name'] ?? ''));
-            $email     = trim((string) ($_POST['email'] ?? ''));
-            $username  = strtolower(trim((string) ($_POST['username'] ?? '')));
             $password  = (string) ($_POST['password'] ?? '');
             $uRole     = trim((string) ($_POST['role'] ?? 'Doctor'));
             $dept      = trim((string) ($_POST['department'] ?? ''));
             $spec      = trim((string) ($_POST['specialty'] ?? ''));
             $license   = trim((string) ($_POST['license'] ?? ''));
             $birthdate = trim((string) ($_POST['birthdate'] ?? ''));
+            $sex       = trim((string) ($_POST['sex'] ?? 'Not specified'));
+            $phone     = trim((string) ($_POST['phone'] ?? ''));
+            $phoneVer  = (int) ($_POST['phone_verified'] ?? 0);
+            $country   = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province  = trim((string) ($_POST['province'] ?? ''));
+            $city      = trim((string) ($_POST['city'] ?? ''));
+            $barangay  = trim((string) ($_POST['barangay'] ?? ''));
+            $street    = trim((string) ($_POST['street'] ?? ''));
+            $postal    = trim((string) ($_POST['postal_code'] ?? ''));
             $active    = isset($_POST['active']) ? 'Active' : 'Disabled';
 
             $fullName = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
-            if ($fullName === '' || $email === '') {
-                flash('User not saved: please enter name and email');
+            if ($fullName === '') {
+                flash('User not saved: please enter full name.');
                 redirect($return);
             }
             if (strcasecmp($uRole, 'Administrator') === 0 || strcasecmp($uRole, 'Admin') === 0) {
                 flash('There can only be one Administrator in the system');
                 redirect($return);
-            }
-
-            $idx = null;
-            foreach ($st['users'] as $i => $u) {
-                if (($orig !== '' && $u[1] === $orig) || strcasecmp($u[1], $email) === 0) {
-                    $idx = $i;
-                    break;
-                }
             }
 
             $rolePrefix = db_prefix_for_role($uRole);
@@ -390,79 +620,91 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 default => 'Staff',
             };
 
-            if ($idx !== null) {
-                if ($username === '') {
-                    $username = $st['users'][$idx][8] ?? strtolower(explode('@', $email)[0]);
+            $addrParts     = array_filter([$street, $barangay, $city, $province, $country, $postal]);
+            $formattedAddr = implode(', ', $addrParts) ?: '—';
+
+            // Check if updating existing user
+            $existingAcc = null;
+            if ($origId !== '') {
+                $existingAcc = db_find_account_by_id($origId);
+                if (!$existingAcc) {
+                    $pdo = db();
+                    $stmt = $pdo->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:em) LIMIT 1');
+                    $stmt->execute([':em' => $origId]);
+                    $existingAcc = $stmt->fetch();
                 }
-                $upd = db_update_user_account($orig ?: $email, $fullName, $email, $username, $uRoleNorm, $active, $dept, $spec, $license, $password, $birthdate);
+            }
+
+            if ($existingAcc) {
+                $upd = db_update_user_account(
+                    $origId,
+                    $fullName,
+                    (string) ($existingAcc['email'] ?? ''),
+                    (string) ($existingAcc['username'] ?? $fullName),
+                    $uRoleNorm,
+                    $active,
+                    $dept,
+                    $spec,
+                    $license,
+                    $password,
+                    $birthdate,
+                    $phone,
+                    $country,
+                    $province,
+                    $city,
+                    $barangay,
+                    $street,
+                    $postal,
+                    $sex
+                );
                 if (isset($upd['error'])) {
                     flash('User not saved: ' . $upd['error']);
                     redirect($return);
                 }
-                $updatedId = (string) ($upd['user_id'] ?? ($st['users'][$idx][7] ?? db_next_user_id($rolePrefix)));
-                $fmtBdate  = format_birthdate((string) ($upd['birthdate'] ?? $birthdate));
+                $updatedId = (string) ($upd['user_id'] ?? $existingAcc['user_id']);
                 $st = db_load_state();
                 $_SESSION['state'] = &$st;
-                if ($uRoleNorm === 'Patient' && $fmtBdate !== '—') {
-                    foreach ($st['patients'] as &$pt) {
-                        if (strcasecmp((string) ($pt[8] ?? ''), $updatedId) === 0 || strcasecmp($pt[0], $fullName) === 0) {
-                            $pt[1] = $fmtBdate;
-                            break;
-                        }
-                    }
-                    unset($pt);
-                }
                 $logAudit('Updated', 'users', '#' . $updatedId);
-                flash('User "' . $fullName . '" (' . $updatedId . ') updated');
+                flash('User "' . $fullName . '" (' . $updatedId . ') updated successfully.');
             } else {
                 if ($password === '' || mb_strlen($password) < 8) {
                     flash('User not saved: please enter a password of at least 8 characters');
                     redirect($return);
                 }
-                if ($username === '') {
-                    $username = strtolower(explode('@', $email)[0]);
-                }
                 $newUserId = db_next_user_id($rolePrefix);
                 $created   = db_create_account([
-                    'user_id'   => $newUserId,
-                    'username'  => $username,
-                    'email'     => $email,
-                    'password'  => $password,
-                    'full_name' => $fullName,
-                    'role'      => $uRoleNorm,
-                    'status'    => $active,
-                    'department'=> $dept,
-                    'specialty' => $spec,
-                    'license'   => $license,
-                    'birthdate' => $birthdate,
+                    'user_id'        => $newUserId,
+                    'username'       => $fullName,
+                    'email'          => strtolower($newUserId) . '@medicore.local',
+                    'password'       => $password,
+                    'full_name'      => $fullName,
+                    'role'           => $uRoleNorm,
+                    'status'         => $active,
+                    'department'     => $dept,
+                    'specialty'      => $spec,
+                    'license'        => $license,
+                    'birthdate'      => $birthdate,
+                    'phone'          => $phone,
+                    'phone_verified' => $phoneVer,
+                    'address'        => $formattedAddr,
+                    'country'        => $country,
+                    'province'       => $province,
+                    'city'           => $city,
+                    'barangay'       => $barangay,
+                    'street'         => $street,
+                    'postal_code'    => $postal,
+                    'sex'            => $sex,
                 ], true);
+
                 if (isset($created['error'])) {
                     flash('User not saved: ' . $created['error']);
                     redirect($return);
                 }
                 $finalUserId = (string) ($created['account']['user_id'] ?? $newUserId);
-                $fmtBdate    = format_birthdate((string) ($created['account']['birthdate'] ?? $birthdate));
                 $st = db_load_state();
                 $_SESSION['state'] = &$st;
-                if ($uRoleNorm === 'Patient') {
-                    $ptExists = false;
-                    foreach ($st['patients'] as &$pt) {
-                        if (strcasecmp((string) ($pt[8] ?? ''), $finalUserId) === 0 || strcasecmp($pt[0], $fullName) === 0) {
-                            if ($fmtBdate !== '—') {
-                                $pt[1] = $fmtBdate;
-                            }
-                            $pt[8]    = $finalUserId;
-                            $ptExists = true;
-                            break;
-                        }
-                    }
-                    unset($pt);
-                    if (!$ptExists) {
-                        array_unshift($st['patients'], [$fullName, $fmtBdate, '—', 'HIN-' . rand(100, 999) . '-' . rand(100, 999), initials($fullName, 2), 'Not specified', 'Not specified', '—', $finalUserId]);
-                    }
-                }
                 $logAudit('Created', 'users', '#' . $finalUserId);
-                flash('User "' . $fullName . '" added · Assigned ID: ' . $finalUserId . ' · Username: ' . $username);
+                flash('User "' . $fullName . '" created · Assigned ID: ' . $finalUserId);
             }
             redirect($return);
 
@@ -488,8 +730,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sex    = trim((string) ($_POST['sex'] ?? ''));
             $phone  = trim((string) ($_POST['phone'] ?? ''));
             $blood  = trim((string) ($_POST['blood_type'] ?? ''));
-            $addr   = trim((string) ($_POST['address'] ?? ''));
-            $hin    = trim((string) ($_POST['insurance'] ?? ''));
+            $email  = trim((string) ($_POST['email'] ?? ''));
+
+            // Chopped address
+            $country  = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province = trim((string) ($_POST['province'] ?? ''));
+            $city     = trim((string) ($_POST['city'] ?? ''));
+            $barangay = trim((string) ($_POST['barangay'] ?? ''));
+            $street   = trim((string) ($_POST['street'] ?? ''));
+            $postal   = trim((string) ($_POST['postal_code'] ?? ''));
+            $phoneVerified = (int) ($_POST['phone_verified'] ?? 0);
 
             $fullName = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
             if ($fullName === '') {
@@ -497,16 +747,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect($return);
             }
 
+            if ($phone === '') {
+                flash('Please enter the patient\'s phone number.');
+                redirect($return);
+            }
+
+            // Verify phone via OTP if not already marked verified
+            $cleanPhone = preg_replace('/[^0-9+]/', '', $phone);
+            if (!empty($_SESSION['phone_verified_' . md5($cleanPhone)])) {
+                $phoneVerified = 1;
+            }
+
             $formattedBirth = $bdate !== '' && strtotime($bdate) !== false
                 ? date('M d, Y', strtotime($bdate))
                 : ($orig !== '' ? $bdate : date('M d, Y', strtotime('-30 years')));
-            $formattedPhone = $phone !== '' ? $phone : '(415) 555-' . rand(1000, 9999);
-            $formattedHin   = $hin !== '' ? $hin : 'HIN-' . rand(100, 999) . '-' . rand(100, 999);
+            $formattedPhone = $phone;
+            $formattedHin   = '—'; // Insurance number removed
             $formattedSex   = ($sex !== '' && $sex !== 'Select sex') ? $sex : 'Not specified';
             // Blood type is optional
             $formattedBlood = ($blood !== '' && !str_starts_with($blood, 'Optional') && $blood !== 'Select blood type') ? $blood : 'Not specified';
-            $formattedAddr  = $addr !== '' ? $addr : 'San Francisco, CA';
-            $avatar         = initials($fullName, 2);
+
+            $addrParts     = array_filter([$street, $barangay, $city, $province, $country, $postal]);
+            $formattedAddr = implode(', ', $addrParts) ?: '—';
+            $avatar        = initials($fullName, 2);
 
             $idx = null;
             foreach ($st['patients'] as $i => $pt) {
@@ -518,7 +781,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($idx !== null) {
                 $ptId = $st['patients'][$idx][8] ?? db_next_user_id('P');
-                $row  = [$fullName, $formattedBirth, $formattedPhone, $formattedHin, $avatar, $formattedSex, $formattedBlood, $formattedAddr, $ptId];
+                $row  = [
+                    $fullName, $formattedBirth, $formattedPhone, $formattedHin, $avatar, $formattedSex, $formattedBlood, $formattedAddr, $ptId,
+                    'country'        => $country,
+                    'province'       => $province,
+                    'city'           => $city,
+                    'barangay'       => $barangay,
+                    'street'         => $street,
+                    'postal_code'    => $postal,
+                    'phone_verified' => $phoneVerified,
+                    'email'          => $email,
+                ];
                 $st['patients'][$idx] = $row;
                 $logAudit('Updated', 'patients', '#' . $ptId);
                 flash('Patient record updated for ' . $fullName . ' (Assigned ID: ' . $ptId . ')');
@@ -527,7 +800,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $ptId    = (preg_match('/^P-\d{4,}$/', $reqPtId) && !in_array($reqPtId, array_column($st['patients'], 8), true))
                     ? $reqPtId
                     : db_next_user_id('P');
-                $row  = [$fullName, $formattedBirth, $formattedPhone, $formattedHin, $avatar, $formattedSex, $formattedBlood, $formattedAddr, $ptId];
+                $row  = [
+                    $fullName, $formattedBirth, $formattedPhone, $formattedHin, $avatar, $formattedSex, $formattedBlood, $formattedAddr, $ptId,
+                    'country'        => $country,
+                    'province'       => $province,
+                    'city'           => $city,
+                    'barangay'       => $barangay,
+                    'street'         => $street,
+                    'postal_code'    => $postal,
+                    'phone_verified' => $phoneVerified,
+                    'email'          => $email,
+                ];
                 array_unshift($st['patients'], $row);
                 foreach ($st['roles'] as &$rr) {
                     if ($rr[0] === 'Patient') {
@@ -536,7 +819,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 unset($rr);
                 $logAudit('Created', 'patients', '#' . $ptId);
-                flash($fullName . ' registered · Assigned Patient ID: ' . $ptId . ' (for account creation)');
+                flash($fullName . ' registered · Assigned Patient ID: ' . $ptId . ($phoneVerified ? ' (Phone Verified)' : ''));
+            }
+            db_save_state($st);
+            redirect($return);
+
+        case 'toggle_patient':
+            $patientId = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
+            if ($patientId !== '' && in_array($role, ['Staff', 'Admin'], true)) {
+                $newStatus = db_toggle_patient_status($patientId);
+                foreach ($st['patients'] as &$p) {
+                    if (strcasecmp((string) ($p[8] ?? ''), $patientId) === 0) {
+                        $p['status'] = $newStatus;
+                        break;
+                    }
+                }
+                unset($p);
+                foreach ($st['users'] as &$u) {
+                    if (strcasecmp((string) ($u[7] ?? ''), $patientId) === 0) {
+                        $u[3] = $newStatus;
+                        break;
+                    }
+                }
+                unset($u);
+                $logAudit($newStatus === 'Active' ? 'Activated' : 'Disabled', 'patients', '#' . $patientId);
+                flash('Patient #' . $patientId . ' status updated to ' . $newStatus . '.');
+            }
+            redirect($return);
+
+        case 'delete_patient':
+            $patientId = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
+            if ($patientId !== '' && in_array($role, ['Staff', 'Admin'], true)) {
+                $arc = db_delete_patient($patientId, current_user_name($role));
+                if ($arc !== null) {
+                    $st = db_load_state();
+                    $_SESSION['state'] = &$st;
+                    $logAudit('Deleted', 'patients', '#' . $patientId);
+                    flash('Patient #' . $patientId . ' deleted and moved to Archive (' . $arc[0] . ').');
+                }
+            }
+            if (str_contains($return, 'detail=') || str_contains($return, $patientId)) {
+                $return = 'index.php?page=patients';
             }
             redirect($return);
 
@@ -671,19 +994,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     redirect($return);
                 }
                 $newRow = [$name, $head !== '' ? $head : 'Unassigned', '0', $loc !== '' ? $loc : 'Main Wing'];
-            } elseif ($type === 'medications') {
-                $name = trim((string) ($_POST['med_name'] ?? ''));
-                $cat  = trim((string) ($_POST['med_category'] ?? 'Antibiotic'));
-                $str  = trim((string) ($_POST['med_strength'] ?? '500 mg'));
-                $stk  = trim((string) ($_POST['med_stock'] ?? '100 units'));
-                if ($name === '') {
-                    flash('Please enter a medication name');
-                    redirect($return);
-                }
-                if ($stk !== '' && is_numeric($stk)) {
-                    $stk .= ' units';
-                }
-                $newRow = [$name, $cat, $str !== '' ? $str : '500 mg', $stk !== '' ? $stk : '100 units'];
             } else {
                 redirect($return);
             }
@@ -725,7 +1035,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $recordLabel = match ($type) {
                         'departments' => 'Department',
                         'rooms'       => 'Room',
-                        'medications' => 'Medication',
                         default       => ucfirst(rtrim($type, 's')),
                     };
                     $arcRow = db_archive_record($key, $recordLabel, current_user_name($role), [

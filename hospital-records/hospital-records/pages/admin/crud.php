@@ -1,5 +1,5 @@
 <?php
-/** Shared page for Departments / Rooms / Medications ($page is the slug). */
+/** Shared page for Departments / Rooms ($page is the slug). */
 $type     = $page;
 $typeName = ucfirst($type);                       // "Departments"
 $singular = strtolower(rtrim($typeName, 's'));    // "department"
@@ -9,8 +9,7 @@ $records = array_values(array_filter($state['crud'][$type] ?? [], static fn ($r)
 
 $headings = match ($type) {
     'departments' => ['Department', 'Head', 'Location', 'Actions'],
-    'rooms'       => ['Room', 'Ward', 'Status', 'Patient', 'Actions'],
-    default       => ['Medication', 'Category', 'Strength', 'Stock', 'Actions'],
+    default       => ['Room', 'Ward', 'Status', 'Patient', 'Actions'],
 };
 
 $toolbar = toolbar_open($type) . search_box('Search ' . $type . '...', 'q', $q) . toolbar_close();

@@ -2,7 +2,8 @@
 /** @var string $modal  Modal name from ?modal=... */
 $closeUrl    = url_with(['modal' => null, 'room' => null, 'key' => null, 'email' => null, 'appt' => null, 'doc' => null, 'dept' => null]);
 $isEdit      = str_starts_with($modal, 'Edit');
-$isUser      = str_contains($modal, 'user');
+$isUserDetail = ($modal === 'User details');
+$isUser       = str_contains($modal, 'user') && !$isUserDetail;
 $isPatient   = in_array($modal, ['Register patient', 'Edit patient'], true);
 $isAppt      = $modal === 'Book appointment';
 $isApptDetail = $modal === 'Appointment details';
@@ -51,7 +52,7 @@ if ($modal === 'Edit user') {
     }
 }
 
-$patientRow = ['', '', '', '', '', 'Female', 'Optional / Unknown', ''];
+$patientRow = ['', '', '', '', '', '', 'Optional / Unknown', ''];
 if ($modal === 'Edit patient') {
     foreach ($state['patients'] as $pt) {
         if ($pt[0] === (string) ($_GET['patient'] ?? '')) {
@@ -83,7 +84,8 @@ if (!$availableRooms) {
     $availableRooms = ['No available rooms'];
 }
 
-$subtitle = $isUser ? 'Create or update a staff account and assign access.'
+$subtitle = $isUserDetail ? 'Complete account credentials, contact, and profile details.'
+    : ($isUser ? 'Create or update an account and assign access.'
     : ($isPatient ? ($modal === 'Edit patient' ? 'Update patient contact and insurance information.' : 'Add a new patient to the hospital record.')
     : ($isAppt ? 'Schedule a new patient visit.'
     : ($isApptDetail ? 'Review visit details and update appointment status.'
@@ -92,7 +94,7 @@ $subtitle = $isUser ? 'Create or update a staff account and assign access.'
     : ($isRole ? 'Set the role name and choose what it can access.'
     : ($isRoom ? 'Select the room number, ward, and patient assignment details.'
     : ($isDept ? 'Manage hospital department details and leadership.'
-    : ($isMed ? 'Manage pharmacy medication inventory.' : 'Update this record.')))))))));
+    : ($isMed ? 'Manage pharmacy medication inventory.' : 'Update this record.'))))))))));
 
 $submit = $isEdit ? 'Save changes' : ($isAppt ? 'Book appointment' : ($isApptDetail ? 'Update appointment' : ($isAdmit ? 'Admit patient' : 'Save')));
 $doneMsg = $isEdit ? 'Changes saved successfully' : $modal . ' completed successfully';
@@ -115,7 +117,7 @@ if (!$doctorNameOptions) {
 ?>
 <div class="modal-backdrop">
     <a class="modal-dismiss" href="<?= e($closeUrl) ?>" aria-label="Close dialog"></a>
-    <form class="modal <?= ($isPatient || $isUser || $isApptDetail) ? 'modal-large' : '' ?>" method="post" action="index.php"<?= $isDischarge ? ' enctype="multipart/form-data"' : '' ?><?= (($role ?? '') === 'Admin') ? ' onsubmit="return confirm(\'Are you sure about this action?\');"' : '' ?>>
+    <form class="modal <?= ($isPatient || $isUser || $isApptDetail) ? 'modal-large' : '' ?>" method="post" action="index.php"<?= $isDischarge ? ' enctype="multipart/form-data"' : '' ?> onsubmit="return confirm('Are you sure about this action?');">
         <?php if ($isDischarge): ?>
             <input type="hidden" name="action" value="discharge">
             <input type="hidden" name="key" value="<?= e($dischargeKey) ?>">
@@ -162,37 +164,155 @@ if (!$doctorNameOptions) {
         </div>
 
         <div class="modal-body">
-            <?php if ($isUser): ?>
+            <?php if ($isUserDetail): ?>
                 <?php
-                $nameParts   = explode(' ', $userRow[0], 2);
+                $uId       = $userRow[7] ?? '—';
+                $uName     = $userRow[0] ?? '—';
+                $uRole     = $userRow[2] ?? 'Staff';
+                $uStatus   = $userRow[3] ?? 'Active';
+                $uLastLog  = $userRow[4] ?? 'Never';
+                $uDept     = $userRow[5] ?? '';
+                $uSpec     = $userRow[6] ?? '';
+                $uLicense  = $userRow[9] ?? '';
+                $uDob      = (string) ($userRow[10] ?? '');
+                $uPhone    = (string) ($userRow['phone'] ?? '');
+                $uSex      = (string) ($userRow['sex'] ?? 'Not specified');
+                $uAddr     = (string) ($userRow['address'] ?? '—');
+                $uAge      = patient_age_label($uDob, false, '—');
+                ?>
+                <div style="background:var(--teal-50); border:1px solid var(--teal-200); border-radius:12px; padding:20px; margin-bottom:20px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                        <div style="display:flex; align-items:center; gap:14px;">
+                            <div class="avatar" style="width:52px; height:52px; font-size:20px; font-weight:700;">
+                                <?= e(initials($uName, 2)) ?>
+                            </div>
+                            <div>
+                                <h3 style="margin:0; font-size:19px; color:var(--navy-900);"><?= e($uName) ?></h3>
+                                <p style="margin:2px 0 0 0; font-size:13px; color:var(--gray-600);">
+                                    Assigned ID: <code style="font-weight:700; color:var(--teal-800); font-size:14px;"><?= e($uId) ?></code> · <?= e($uRole) ?>
+                                </p>
+                            </div>
+                        </div>
+                        <div>
+                            <?= badge($uStatus, $uStatus === 'Active' ? 'success' : 'neutral') ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
+                    <div class="panel" style="padding:16px; background:#fff;">
+                        <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block; margin-bottom:4px;">Mobile Number</span>
+                        <strong style="font-size:15px; color:var(--navy-900); font-family:monospace;"><?= e($uPhone ?: '—') ?></strong>
+                        <?php if ($uPhone !== ''): ?>
+                            <span class="badge badge-success" style="font-size:11px; margin-left:6px;">✓ Verified</span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="panel" style="padding:16px; background:#fff;">
+                        <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block; margin-bottom:4px;">Birthday &amp; Age</span>
+                        <strong style="font-size:14px; color:var(--navy-900);"><?= e($uDob ?: 'Not specified') ?></strong>
+                        <?php if ($uDob !== '' && $uDob !== '—'): ?>
+                            <span style="color:var(--gray-600); font-size:13px;">(Age: <?= e($uAge) ?>)</span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class="panel" style="padding:16px; background:#fff;">
+                        <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block; margin-bottom:4px;">Sex</span>
+                        <strong style="font-size:14px; color:var(--navy-900);"><?= e($uSex) ?></strong>
+                    </div>
+
+                    <div class="panel" style="padding:16px; background:#fff;">
+                        <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block; margin-bottom:4px;">Last Login</span>
+                        <strong style="font-size:14px; color:var(--navy-900);"><?= e($uLastLog) ?></strong>
+                    </div>
+                </div>
+
+                <div class="panel" style="padding:16px; background:#fff; margin-bottom:20px;">
+                    <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block; margin-bottom:4px;">Residential Address</span>
+                    <strong style="font-size:14px; color:var(--navy-900); line-height:1.5;"><?= e($uAddr ?: '—') ?></strong>
+                </div>
+
+                <?php if ($uRole === 'Doctor'): ?>
+                    <div class="panel" style="padding:16px; background:#fff; margin-bottom:20px;">
+                        <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--teal-800); display:block; margin-bottom:10px;">Doctor Practice Details</span>
+                        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; font-size:13px;">
+                            <div>
+                                <span style="font-size:11px; color:var(--gray-500); display:block;">Department</span>
+                                <strong><?= e($uDept ?: 'General Medicine') ?></strong>
+                            </div>
+                            <div>
+                                <span style="font-size:11px; color:var(--gray-500); display:block;">Specialty</span>
+                                <strong><?= e($uSpec ?: 'General Practice') ?></strong>
+                            </div>
+                            <div>
+                                <span style="font-size:11px; color:var(--gray-500); display:block;">Medical License</span>
+                                <strong><?= e($uLicense ?: '—') ?></strong>
+                            </div>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
+                <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px; border-top:1px solid var(--gray-200); padding-top:16px;">
+                    <a class="btn btn-secondary" href="<?= e($closeUrl) ?>"><span>Close</span></a>
+                    <a class="btn btn-primary" href="<?= e(url(['page' => 'users', 'modal' => 'Edit user', 'user_id' => $uId])) ?>"><span><?= icon('edit', 14) ?> Edit User</span></a>
+                </div>
+
+            <?php elseif ($isUser): ?>
+                <?php
+                $nameParts   = explode(' ', (string) ($userRow[0] ?? ''), 2);
                 $uFirst      = $nameParts[0] ?? '';
                 $uLast       = $nameParts[1] ?? '';
-                $uUser       = ($userRow[8] ?? '') !== '' ? $userRow[8] : ($userRow[1] !== '' ? explode('@', $userRow[1])[0] : '');
                 $uLicense    = $userRow[9] ?? '';
-                $currentRole = strcasecmp((string) ($userRow[2] ?? 'Doctor'), 'Front desk') === 0 ? 'Staff' : ((string) ($userRow[2] ?? 'Doctor'));
+                $currentRole = strcasecmp((string) ($userRow[2] ?? 'Staff'), 'Front desk') === 0 ? 'Staff' : ((string) ($userRow[2] ?? 'Staff'));
                 if ($currentRole === '') {
-                    $currentRole = 'Doctor';
+                    $currentRole = 'Staff';
                 }
                 $nextDocId     = db_next_user_id('D');
                 $nextStaffId   = db_next_user_id('S');
                 $nextCashierId = db_next_user_id('C');
-                $nextPtId      = db_next_user_id('P');
                 $existingUId   = trim((string) ($userRow[7] ?? ''));
                 $currentUId    = $existingUId !== '' ? $existingUId : match (db_prefix_for_role($currentRole)) {
                     'D'     => $nextDocId,
                     'C'     => $nextCashierId,
-                    'P'     => $nextPtId,
                     default => $nextStaffId,
                 };
+
+                $uBdateRaw = trim((string) ($userRow[10] ?? ''));
+                $uBdateIso = ($uBdateRaw !== '' && $uBdateRaw !== '—' && strtotime($uBdateRaw) !== false)
+                    ? date('Y-m-d', strtotime($uBdateRaw))
+                    : '';
+                $uPhone      = (string) ($userRow['phone'] ?? '');
+                $uSex        = (string) ($userRow['sex'] ?? 'Not specified');
+                $uCountry    = (string) ($userRow['country'] ?? 'Philippines') ?: 'Philippines';
+                $uProvince   = (string) ($userRow['province'] ?? '');
+                $uCity       = (string) ($userRow['city'] ?? '');
+                $uBarangay   = (string) ($userRow['barangay'] ?? '');
+                $uStreet     = (string) ($userRow['street'] ?? '');
+                $uPostal     = (string) ($userRow['postal_code'] ?? '');
+                $uAddr       = (string) ($userRow['address'] ?? '');
+
+                if ($uProvince === '' && $uCity === '' && $uAddr !== '') {
+                    $parts = array_map('trim', explode(',', $uAddr));
+                    if (count($parts) >= 2) {
+                        $uStreet = $parts[0] ?? '';
+                        $uCity   = $parts[1] ?? '';
+                        if (count($parts) >= 3) {
+                            $uProvince = $parts[2] ?? '';
+                        }
+                    } else {
+                        $uStreet = $uAddr;
+                    }
+                }
+                $uPhoneVerified = !empty($userRow['phone_verified']) || ($modal === 'Edit user' && !empty($uPhone));
                 ?>
                 <div class="form-grid" style="align-items:start;">
                     <label class="field" style="align-content:start;">
-                        <span class="field-label">Role</span>
+                        <span class="field-label">Role *</span>
                         <span class="input-wrap">
                             <select name="role" id="usr-role-select">
-                                <?php foreach ($roleNames as $optRole): ?>
-                                    <option value="<?= e($optRole) ?>"<?= strcasecmp($optRole, $currentRole) === 0 ? ' selected' : '' ?>><?= e($optRole) ?></option>
-                                <?php endforeach; ?>
+                                <option value="Staff"<?= strcasecmp('Staff', $currentRole) === 0 ? ' selected' : '' ?>>Staff</option>
+                                <option value="Cashier"<?= strcasecmp('Cashier', $currentRole) === 0 ? ' selected' : '' ?>>Cashier</option>
+                                <option value="Doctor"<?= strcasecmp('Doctor', $currentRole) === 0 ? ' selected' : '' ?>>Doctor</option>
                             </select>
                             <?= icon('down', 16) ?>
                         </span>
@@ -203,104 +323,204 @@ if (!$doctorNameOptions) {
                         <span class="input-wrap">
                             <input type="text" name="user_id" id="usr-id-preview" value="<?= e($currentUId) ?>" readonly style="background:var(--gray-50); font-family:monospace; font-weight:700; color:var(--teal-700);">
                         </span>
-                        <small class="field-hint"><b>D</b> = Doctor, <b>S</b> = Staff, <b>C</b> = Cashier, <b>P</b> = Patient (auto-incremented).</small>
+                        <small class="field-hint"><b>D</b> = Doctor, <b>S</b> = Staff, <b>C</b> = Cashier.</small>
                     </label>
                 </div>
+
                 <div class="form-grid three-col">
                     <?= field('First name', 'first_name', 'First name', 'text', $uFirst) ?>
                     <?= field('Middle name', 'middle_name', 'Optional') ?>
                     <?= field('Last name', 'last_name', 'Last name', 'text', $uLast) ?>
                 </div>
-                <div class="form-grid">
-                    <?= field('Email', 'email', 'name@medicore.com', 'email', $userRow[1]) ?>
-                    <?= field('Username', 'username', 'username', 'text', $uUser) ?>
+
+                <!-- Phone Verification Row -->
+                <div style="margin-top:16px; margin-bottom:8px; padding-top:12px; border-top:1px solid var(--gray-200);">
+                    <strong style="display:block; font-size:13px; color:var(--navy-900); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px;">Phone Verification</strong>
+                    <p style="font-size:12px; color:var(--gray-600); margin:0 0 10px 0;">Ask for the mobile number and verify it via SMS OTP code before creating account.</p>
                 </div>
-                <?php
-                $uBdateRaw = trim((string) ($userRow[10] ?? ''));
-                $uBdateIso = ($uBdateRaw !== '' && $uBdateRaw !== '—' && strtotime($uBdateRaw) !== false)
-                    ? date('Y-m-d', strtotime($uBdateRaw))
-                    : '';
-                ?>
-                <?= field(
-                    $isEdit ? 'New password (optional)' : 'Password',
-                    'password',
-                    $isEdit ? 'Leave blank to keep current password' : 'Minimum 8 characters',
-                    'password'
-                ) ?>
-                <div class="conditional-fields" id="usr-doc-fields">
-                    <p>Doctor information (if applicable)</p>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Mobile Number *</span>
+                        <div style="display:flex; gap:8px;">
+                            <span class="input-wrap" style="flex:1;">
+                                <input type="tel" name="phone" id="usr-phone-input" placeholder="09XXXXXXXX" value="<?= e($uPhone) ?>" required>
+                            </span>
+                            <button type="button" id="btn-usr-send-otp" class="btn btn-secondary" style="height:42px; padding:0 14px; white-space:nowrap;">
+                                <span>Send OTP</span>
+                            </button>
+                        </div>
+                        <small class="field-hint">User's registered mobile number.</small>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Phone Verification OTP *</span>
+                        <div style="display:flex; gap:8px;">
+                            <span class="input-wrap" style="flex:1;">
+                                <input type="text" id="usr-otp-code-input" placeholder="6-digit code" maxlength="6" style="letter-spacing:2px; font-weight:700;">
+                            </span>
+                            <button type="button" id="btn-usr-verify-otp" class="btn btn-primary" style="height:42px; padding:0 14px; white-space:nowrap;">
+                                <span>Verify Code</span>
+                            </button>
+                        </div>
+                        <small class="field-hint" id="usr-otp-status-hint">
+                            <?= $uPhoneVerified ? '<span style="color:var(--teal-700); font-weight:600;">✓ Phone verified</span>' : 'Input the 6-digit OTP code to confirm.' ?>
+                        </small>
+                    </label>
+                </div>
+
+                <!-- Simulated SMS alert banner for testing -->
+                <div id="usr-sms-sim-box" style="display:none; margin-bottom:14px; padding:10px 14px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; font-size:12.5px; color:#1e40af;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span id="usr-sms-sim-text"></span>
+                        <button type="button" id="btn-usr-sms-autofill" class="btn btn-sm btn-primary" style="font-size:11px; padding:3px 8px; margin-left:8px;">Auto-fill</button>
+                    </div>
+                </div>
+                <input type="hidden" name="phone_verified" id="usr-phone-verified" value="<?= $uPhoneVerified ? '1' : '0' ?>">
+
+                <!-- Birthday & Sex -->
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Birthday (Date of birth) *</span>
+                        <span class="input-wrap">
+                            <input type="date" name="birthdate" id="usr-birthdate" max="<?= date('Y-m-d') ?>" value="<?= e($uBdateIso) ?>" required>
+                        </span>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Sex *</span>
+                        <span class="input-wrap">
+                            <select name="sex" id="usr-sex-select" required>
+                                <option value="" disabled <?= empty($uSex) || $uSex === 'Not specified' ? 'selected' : '' ?> hidden>Select sex</option>
+                                <option value="Female" <?= $uSex === 'Female' ? 'selected' : '' ?>>Female</option>
+                                <option value="Male" <?= $uSex === 'Male' ? 'selected' : '' ?>>Male</option>
+                                <option value="Other" <?= $uSex === 'Other' ? 'selected' : '' ?>>Other</option>
+                            </select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+                </div>
+
+                <!-- Chopped Address (Cascading Dropdowns) -->
+                <div style="margin-top:16px; margin-bottom:8px; padding-top:12px; border-top:1px solid var(--gray-200);">
+                    <strong style="display:block; font-size:13px; color:var(--navy-900); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px;">Residential Address</strong>
+                    <p style="font-size:12px; color:var(--gray-600); margin:0 0 10px 0;">Alphabetical dropdown options for Country, Province, City, and Barangay. Postal code is automatically populated.</p>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Country *</span>
+                        <span class="input-wrap">
+                            <select name="country" id="usr-country-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Province / Region *</span>
+                        <span class="input-wrap">
+                            <select name="province" id="usr-province-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">City / Municipality *</span>
+                        <span class="input-wrap">
+                            <select name="city" id="usr-city-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Barangay / District *</span>
+                        <span class="input-wrap">
+                            <select name="barangay" id="usr-barangay-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Street / Building / Unit (put N/A if not applicable) *</span>
+                        <span class="input-wrap">
+                            <input type="text" name="street" id="usr-street-input" placeholder="e.g. 123 Main St, Unit 4B (put N/A if not applicable)" value="<?= e($uStreet) ?>" required>
+                        </span>
+                        <small class="field-hint">House/building no., street, or unit (put N/A if not applicable)</small>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Postal / ZIP Code</span>
+                        <span class="input-wrap">
+                            <input type="text" name="postal_code" id="usr-postal-input" placeholder="Auto-populated by city" value="<?= e($uPostal) ?>" readonly style="background:var(--gray-50); font-family:monospace; font-weight:600;">
+                        </span>
+                        <small class="field-hint">Auto-populated based on selected City/Region.</small>
+                    </label>
+                </div>
+
+                <div class="conditional-fields" id="usr-doc-fields" style="display:<?= $currentRole === 'Doctor' ? 'block' : 'none' ?>;">
+                    <p style="font-size:13px; font-weight:600; color:var(--teal-900); margin:12px 0 8px 0;">Doctor practice information</p>
                     <div class="form-grid three-col">
                         <?= field('Specialty', 'specialty', 'e.g. Cardiology', 'text', $userRow[6] ?? '') ?>
                         <?= field('License number', 'license', 'Medical license', 'text', $uLicense) ?>
                         <?= select_field('Department', 'department', array_column($state['crud']['departments'] ?? [], 0) ?: ['General Medicine', 'Cardiology', 'Neurology', 'Pediatrics', 'Orthopedics'], $userRow[5] ?? '') ?>
                     </div>
                 </div>
-                <div class="conditional-fields" id="usr-patient-fields" style="display:none;">
-                    <p>Patient information</p>
-                    <div class="form-grid">
-                        <label class="field">
-                            <span class="field-label">Birthday (Date of birth)</span>
-                            <span class="input-wrap">
-                                <input type="date" name="birthdate" id="usr-birthdate" max="<?= date('Y-m-d') ?>" value="<?= e($uBdateIso) ?>">
-                            </span>
-                        </label>
-                        <label class="field">
-                            <span class="field-label">Age (Auto-calculated)</span>
-                            <span class="input-wrap">
-                                <input type="text" id="usr-age-preview" value="<?= e(patient_age_label($uBdateRaw)) ?>" readonly style="background:var(--gray-50); font-weight:600; color:var(--teal-800);">
-                            </span>
-                        </label>
-                    </div>
+
+                <div class="form-grid" style="margin-top:12px;">
+                    <?= field(
+                        $isEdit ? 'New password (optional)' : 'Password *',
+                        'password',
+                        $isEdit ? 'Leave blank to keep current password' : 'Minimum 8 characters',
+                        'password'
+                    ) ?>
                 </div>
+
                 <label class="toggle-row">
                     <span><strong>Account status</strong><small>User can sign in and access records</small></span>
                     <input type="checkbox" name="active" <?= ($userRow[3] ?? 'Active') === 'Active' ? 'checked' : '' ?>><i></i>
                 </label>
+
                 <script>
                 (function () {
+                    // Initialize Address Selector for User
+                    if (window.PHAddressSelector) {
+                        window.PHAddressSelector.init({
+                            country: document.getElementById('usr-country-select'),
+                            province: document.getElementById('usr-province-select'),
+                            city: document.getElementById('usr-city-select'),
+                            barangay: document.getElementById('usr-barangay-select'),
+                            street: document.getElementById('usr-street-input'),
+                            postal: document.getElementById('usr-postal-input'),
+                            initialCountry: <?= json_encode($uCountry) ?>,
+                            initialProvince: <?= json_encode($uProvince) ?>,
+                            initialCity: <?= json_encode($uCity) ?>,
+                            initialBarangay: <?= json_encode($uBarangay) ?>,
+                            initialPostal: <?= json_encode($uPostal) ?>
+                        });
+                    }
+
+                    // Role ID prefix sync
                     var roleSel  = document.getElementById('usr-role-select');
                     var idInput  = document.getElementById('usr-id-preview');
                     var docBox   = document.getElementById('usr-doc-fields');
-                    var ptBox    = document.getElementById('usr-patient-fields');
-                    var bInput   = document.getElementById('usr-birthdate');
-                    var ageBox   = document.getElementById('usr-age-preview');
                     var isEdit   = <?= $isEdit ? 'true' : 'false' ?>;
                     var origRole = <?= json_encode($currentRole) ?>;
                     var origId   = <?= json_encode($existingUId) ?>;
                     var nextIds  = {
                         'Doctor': <?= json_encode($nextDocId) ?>,
                         'Staff': <?= json_encode($nextStaffId) ?>,
-                        'Front desk': <?= json_encode($nextStaffId) ?>,
-                        'Cashier': <?= json_encode($nextCashierId) ?>,
-                        'Patient': <?= json_encode($nextPtId) ?>
+                        'Cashier': <?= json_encode($nextCashierId) ?>
                     };
-                    function calcUsrAge() {
-                        if (!bInput || !ageBox) return;
-                        var val = bInput.value;
-                        if (!val) { ageBox.value = '—'; return; }
-                        var dob = new Date(val + 'T00:00:00');
-                        if (isNaN(dob.getTime())) { ageBox.value = '—'; return; }
-                        var today = new Date();
-                        var age = today.getFullYear() - dob.getFullYear();
-                        var m = today.getMonth() - dob.getMonth();
-                        if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
-                        age = Math.max(0, age);
-                        ageBox.value = age + (age === 1 ? ' year old' : ' years old');
-                    }
+
                     function syncRole() {
                         if (!roleSel) return;
                         var r  = roleSel.value;
-                        var rl = r.toLowerCase();
-                        var isDoc  = rl.indexOf('doc') !== -1;
-                        var isCash = rl.indexOf('cash') !== -1;
-                        var isPt   = rl.indexOf('pat') !== -1;
-                        var targetId = nextIds[r];
-                        if (!targetId) {
-                            if (isDoc) targetId = nextIds['Doctor'];
-                            else if (isCash) targetId = nextIds['Cashier'];
-                            else if (isPt) targetId = nextIds['Patient'];
-                            else targetId = nextIds['Staff'];
-                        }
+                        var isDoc = r === 'Doctor';
+                        var targetId = nextIds[r] || nextIds['Staff'];
                         if (idInput) {
                             if (isEdit && r === origRole && origId) {
                                 idInput.value = origId;
@@ -311,21 +531,134 @@ if (!$doctorNameOptions) {
                         if (docBox) {
                             docBox.style.display = isDoc ? 'block' : 'none';
                         }
-                        if (ptBox) {
-                            ptBox.style.display = isPt ? 'block' : 'none';
-                        }
-                        if (bInput) {
-                            bInput.required = isPt;
-                        }
                     }
-                    if (bInput) {
-                        bInput.addEventListener('input', calcUsrAge);
-                        bInput.addEventListener('change', calcUsrAge);
-                        calcUsrAge();
-                    }
+
                     if (roleSel) {
                         roleSel.addEventListener('change', syncRole);
                         syncRole();
+                    }
+
+                    // Phone OTP verification logic
+                    var phoneInput    = document.getElementById('usr-phone-input');
+                    var btnSendOtp    = document.getElementById('btn-usr-send-otp');
+                    var otpInput      = document.getElementById('usr-otp-code-input');
+                    var btnVerifyOtp  = document.getElementById('btn-usr-verify-otp');
+                    var verifiedInput = document.getElementById('usr-phone-verified');
+                    var statusHint    = document.getElementById('usr-otp-status-hint');
+                    var smsBox        = document.getElementById('usr-sms-sim-box');
+                    var smsText       = document.getElementById('usr-sms-sim-text');
+                    var btnAutofill   = document.getElementById('btn-usr-sms-autofill');
+                    var lastOtp       = '';
+
+                    if (btnSendOtp && phoneInput) {
+                        btnSendOtp.addEventListener('click', function () {
+                            var p = phoneInput.value.trim();
+                            if (!p) {
+                                alert('Please enter a mobile number first.');
+                                phoneInput.focus();
+                                return;
+                            }
+                            btnSendOtp.disabled = true;
+                            btnSendOtp.textContent = 'Sending...';
+
+                            var fd = new FormData();
+                            fd.append('action', 'ajax_send_phone_otp');
+                            fd.append('phone', p);
+                            fd.append('patient_id', idInput ? idInput.value : '');
+                            fd.append('purpose', 'verification');
+
+                            fetch('index.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                                .then(function (r) { return r.json(); })
+                                .then(function (data) {
+                                    btnSendOtp.disabled = false;
+                                    btnSendOtp.textContent = 'Resend OTP';
+                                    if (data.ok) {
+                                        lastOtp = data.code || '';
+                                        if (smsBox && smsText) {
+                                            smsText.textContent = data.simulated_message || ('💬 Verification code: ' + lastOtp);
+                                            smsBox.style.display = 'block';
+                                        }
+                                        if (statusHint) {
+                                            statusHint.innerHTML = '<span style="color:var(--teal-700);">OTP code sent! Enter it in the verification field.</span>';
+                                        }
+                                        if (otpInput) otpInput.focus();
+                                    } else {
+                                        alert(data.message || 'Failed to send OTP.');
+                                    }
+                                })
+                                .catch(function () {
+                                    btnSendOtp.disabled = false;
+                                    btnSendOtp.textContent = 'Send OTP';
+                                    alert('Network error while requesting OTP.');
+                                });
+                        });
+                    }
+
+                    if (btnAutofill) {
+                        btnAutofill.addEventListener('click', function () {
+                            if (lastOtp && otpInput) {
+                                otpInput.value = lastOtp;
+                                if (btnVerifyOtp) btnVerifyOtp.click();
+                            }
+                        });
+                    }
+
+                    if (btnVerifyOtp && otpInput && phoneInput) {
+                        btnVerifyOtp.addEventListener('click', function () {
+                            var code = otpInput.value.trim();
+                            var p = phoneInput.value.trim();
+                            if (!code) {
+                                alert('Please enter the OTP code.');
+                                otpInput.focus();
+                                return;
+                            }
+                            btnVerifyOtp.disabled = true;
+                            btnVerifyOtp.textContent = 'Verifying...';
+
+                            var fd = new FormData();
+                            fd.append('action', 'ajax_verify_phone_otp');
+                            fd.append('phone', p);
+                            fd.append('code', code);
+                            fd.append('purpose', 'verification');
+
+                            fetch('index.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                                .then(function (r) { return r.json(); })
+                                .then(function (data) {
+                                    btnVerifyOtp.disabled = false;
+                                    btnVerifyOtp.textContent = 'Verify Code';
+                                    if (data.ok) {
+                                        if (verifiedInput) verifiedInput.value = '1';
+                                        if (statusHint) {
+                                            statusHint.innerHTML = '<strong style="color:var(--teal-700);">✓ Phone Verified Successfully</strong>';
+                                        }
+                                        if (smsBox) smsBox.style.display = 'none';
+                                        btnVerifyOtp.style.background = 'var(--teal-600)';
+                                        btnVerifyOtp.textContent = '✓ Verified';
+                                        btnVerifyOtp.disabled = true;
+                                    } else {
+                                        alert(data.message || 'Invalid or expired OTP code.');
+                                    }
+                                })
+                                .catch(function () {
+                                    btnVerifyOtp.disabled = false;
+                                    btnVerifyOtp.textContent = 'Verify Code';
+                                    alert('Network error while verifying OTP.');
+                                });
+                        });
+                    }
+
+                    // Enforce phone verification on form submission
+                    var modalForm = document.querySelector('form.modal');
+                    if (modalForm && verifiedInput) {
+                        modalForm.addEventListener('submit', function (e) {
+                            if (verifiedInput.value !== '1') {
+                                e.preventDefault();
+                                alert('Please verify the mobile number via SMS OTP before saving the account.');
+                                if (phoneInput && !phoneInput.value) phoneInput.focus();
+                                else if (otpInput) otpInput.focus();
+                                return false;
+                            }
+                        }, true);
                     }
                 })();
                 </script>
@@ -342,6 +675,27 @@ if (!$doctorNameOptions) {
                 $assignedPtId = ($modal === 'Edit patient' && $existingPtId !== '')
                     ? $existingPtId
                     : db_next_user_id('P');
+
+                $ptCountry       = (string) ($patientRow['country'] ?? 'Philippines');
+                $ptProvince      = (string) ($patientRow['province'] ?? '');
+                $ptCity          = (string) ($patientRow['city'] ?? '');
+                $ptBarangay      = (string) ($patientRow['barangay'] ?? '');
+                $ptStreet        = (string) ($patientRow['street'] ?? '');
+                $ptPostal        = (string) ($patientRow['postal_code'] ?? '');
+                $ptPhoneVerified = !empty($patientRow['phone_verified']) || ($modal === 'Edit patient' && !empty($patientRow[2]));
+
+                if ($ptProvince === '' && $ptCity === '' && !empty($patientRow[7])) {
+                    $rawParts = array_map('trim', explode(',', (string) $patientRow[7]));
+                    if (count($rawParts) >= 2) {
+                        $ptStreet = $rawParts[0] ?? '';
+                        $ptCity   = $rawParts[1] ?? '';
+                        if (count($rawParts) >= 3) {
+                            $ptProvince = $rawParts[2] ?? '';
+                        }
+                    } else {
+                        $ptStreet = (string) $patientRow[7];
+                    }
+                }
                 ?>
                 <label class="field">
                     <span class="field-label">Assigned Patient ID (Auto-generated)</span>
@@ -355,50 +709,284 @@ if (!$doctorNameOptions) {
                     <?= field('Middle name', 'middle_name', 'Optional') ?>
                     <?= field('Last name', 'last_name', 'Last name', 'text', $pLast) ?>
                 </div>
-                <div class="form-grid three-col">
+                <div class="form-grid">
                     <label class="field">
-                        <span class="field-label">Birthday (Date of birth)</span>
+                        <span class="field-label">Birthday (Date of birth) *</span>
                         <span class="input-wrap">
                             <input type="date" name="birthdate" id="pt-birthdate" max="<?= date('Y-m-d') ?>" value="<?= e($pBirth) ?>" required>
                         </span>
                     </label>
                     <label class="field">
-                        <span class="field-label">Age (Auto-calculated)</span>
+                        <span class="field-label">Sex *</span>
                         <span class="input-wrap">
-                            <input type="text" id="pt-age-preview" value="<?= e(patient_age_label($patientRow[1] ?? '')) ?>" readonly style="background:var(--gray-50); font-weight:600; color:var(--teal-800);">
+                            <select name="sex" id="pt-sex-select" required>
+                                <option value="" disabled <?= empty($patientRow[5]) ? 'selected' : '' ?> hidden>Select sex</option>
+                                <option value="Female" <?= (($patientRow[5] ?? '') === 'Female') ? 'selected' : '' ?>>Female</option>
+                                <option value="Male" <?= (($patientRow[5] ?? '') === 'Male') ? 'selected' : '' ?>>Male</option>
+                                <option value="Other" <?= (($patientRow[5] ?? '') === 'Other') ? 'selected' : '' ?>>Other</option>
+                            </select>
+                            <?= icon('down', 16) ?>
                         </span>
                     </label>
-                    <?= select_field('Sex', 'sex', ['Select sex', 'Female', 'Male', 'Other'], $patientRow[5] ?? 'Select sex') ?>
                 </div>
+                <!-- Patient Phone Verification -->
+                <div style="margin-top:16px; margin-bottom:8px; padding-top:12px; border-top:1px solid var(--gray-200);">
+                    <strong style="display:block; font-size:13px; color:var(--navy-900); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px;">Phone Verification</strong>
+                    <p style="font-size:12px; color:var(--gray-600); margin:0 0 10px 0;">Staff must ask for the patient's phone number and verify it via SMS OTP code before registration.</p>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Mobile / Phone Number *</span>
+                        <div style="display:flex; gap:8px;">
+                            <span class="input-wrap" style="flex:1;">
+                                <input type="tel" name="phone" id="pt-phone-input" placeholder="09XXXXXXXX" value="<?= e($patientRow[2] ?? '') ?>" required>
+                            </span>
+                            <button type="button" id="btn-pt-send-otp" class="btn btn-secondary" style="height:42px; padding:0 14px; white-space:nowrap;">
+                                <span>Send OTP</span>
+                            </button>
+                        </div>
+                        <small class="field-hint">Patient's active mobile number.</small>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Phone Verification OTP *</span>
+                        <div style="display:flex; gap:8px;">
+                            <span class="input-wrap" style="flex:1;">
+                                <input type="text" id="pt-otp-code-input" placeholder="6-digit code" maxlength="6" style="letter-spacing:2px; font-weight:700;">
+                            </span>
+                            <button type="button" id="btn-pt-verify-otp" class="btn btn-primary" style="height:42px; padding:0 14px; white-space:nowrap;">
+                                <span>Verify Code</span>
+                            </button>
+                        </div>
+                        <small class="field-hint" id="pt-otp-status-hint">
+                            <?= $ptPhoneVerified ? '<span style="color:var(--teal-700); font-weight:600;">✓ Phone verified</span>' : 'Input the OTP sent to patient for confirmation.' ?>
+                        </small>
+                    </label>
+                </div>
+
+                <!-- Simulated SMS banner for testing -->
+                <div id="pt-sms-sim-box" style="display:none; margin-bottom:14px; padding:10px 14px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px; font-size:12.5px; color:#1e40af;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span id="pt-sms-sim-text"></span>
+                        <button type="button" id="btn-pt-sms-autofill" class="btn btn-sm btn-primary" style="font-size:11px; padding:3px 8px; margin-left:8px;">Auto-fill</button>
+                    </div>
+                </div>
+                <div class="form-grid" style="margin-top:12px;">
+                    <label class="field">
+                        <span class="field-label">Email Address (Optional)</span>
+                        <span class="input-wrap">
+                            <input type="email" name="email" id="pt-email-input" placeholder="e.g. name@example.com (Optional)" value="<?= e($patientRow['email'] ?? '') ?>">
+                        </span>
+                        <small class="field-hint">Optional email for hospital notifications and password recovery.</small>
+                    </label>
+                </div>
+
+                <input type="hidden" name="phone_verified" id="pt-phone-verified" value="<?= $ptPhoneVerified ? '1' : '0' ?>">
+
+                <!-- Chopped Address (Cascading Dropdowns) -->
+                <div style="margin-top:16px; margin-bottom:8px; padding-top:12px; border-top:1px solid var(--gray-200);">
+                    <strong style="display:block; font-size:13px; color:var(--navy-900); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px;">Chopped Address</strong>
+                    <p style="font-size:12px; color:var(--gray-600); margin:0 0 10px 0;">Alphabetical dropdown options for Country, Province, City, and Barangay. Postal code is automatically populated.</p>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Country *</span>
+                        <span class="input-wrap">
+                            <select name="country" id="pt-country-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Province / Region *</span>
+                        <span class="input-wrap">
+                            <select name="province" id="pt-province-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">City / Municipality *</span>
+                        <span class="input-wrap">
+                            <select name="city" id="pt-city-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Barangay / District *</span>
+                        <span class="input-wrap">
+                            <select name="barangay" id="pt-barangay-select" required></select>
+                            <?= icon('down', 16) ?>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Street / Building / Unit (put N/A if not applicable) *</span>
+                        <span class="input-wrap">
+                            <input type="text" name="street" id="pt-street-input" placeholder="e.g. 123 Main St, Unit 4B (put N/A if not applicable)" value="<?= e($ptStreet) ?>" required>
+                        </span>
+                        <small class="field-hint">House/building no., street, or unit (put N/A if not applicable)</small>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Postal / ZIP Code</span>
+                        <span class="input-wrap">
+                            <input type="text" name="postal_code" id="pt-postal-input" placeholder="Auto-populated by city" value="<?= e($ptPostal) ?>" readonly style="background:var(--gray-50); font-family:monospace; font-weight:600;">
+                        </span>
+                        <small class="field-hint">Auto-populated based on selected City/Region.</small>
+                    </label>
+                </div>
+
                 <script>
                 (function () {
-                    var bInput = document.getElementById('pt-birthdate');
-                    var ageBox = document.getElementById('pt-age-preview');
-                    function calcPtAge() {
-                        if (!bInput || !ageBox) return;
-                        var val = bInput.value;
-                        if (!val) { ageBox.value = '—'; return; }
-                        var dob = new Date(val + 'T00:00:00');
-                        if (isNaN(dob.getTime())) { ageBox.value = '—'; return; }
-                        var today = new Date();
-                        var age = today.getFullYear() - dob.getFullYear();
-                        var m = today.getMonth() - dob.getMonth();
-                        if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
-                        age = Math.max(0, age);
-                        ageBox.value = age + (age === 1 ? ' year old' : ' years old');
+                    // Initialize Address Selector
+                    if (window.PHAddressSelector) {
+                        window.PHAddressSelector.init({
+                            country: document.getElementById('pt-country-select'),
+                            province: document.getElementById('pt-province-select'),
+                            city: document.getElementById('pt-city-select'),
+                            barangay: document.getElementById('pt-barangay-select'),
+                            street: document.getElementById('pt-street-input'),
+                            postal: document.getElementById('pt-postal-input'),
+                            initialCountry: <?= json_encode($ptCountry ?: 'Philippines') ?>,
+                            initialProvince: <?= json_encode($ptProvince) ?>,
+                            initialCity: <?= json_encode($ptCity) ?>,
+                            initialBarangay: <?= json_encode($ptBarangay) ?>,
+                            initialPostal: <?= json_encode($ptPostal) ?>
+                        });
                     }
-                    if (bInput) {
-                        bInput.addEventListener('input', calcPtAge);
-                        bInput.addEventListener('change', calcPtAge);
-                        calcPtAge();
+
+                    // Phone OTP verification logic
+                    var phoneInput    = document.getElementById('pt-phone-input');
+                    var btnSendOtp    = document.getElementById('btn-pt-send-otp');
+                    var otpInput      = document.getElementById('pt-otp-code-input');
+                    var btnVerifyOtp  = document.getElementById('btn-pt-verify-otp');
+                    var verifiedInput = document.getElementById('pt-phone-verified');
+                    var statusHint    = document.getElementById('pt-otp-status-hint');
+                    var smsBox        = document.getElementById('pt-sms-sim-box');
+                    var smsText       = document.getElementById('pt-sms-sim-text');
+                    var btnAutofill   = document.getElementById('btn-pt-sms-autofill');
+                    var lastOtp       = '';
+
+                    if (btnSendOtp && phoneInput) {
+                        btnSendOtp.addEventListener('click', function () {
+                            var p = phoneInput.value.trim();
+                            if (!p) {
+                                alert('Please enter a phone number first.');
+                                phoneInput.focus();
+                                return;
+                            }
+                            btnSendOtp.disabled = true;
+                            btnSendOtp.textContent = 'Sending...';
+
+                            var fd = new FormData();
+                            fd.append('action', 'ajax_send_phone_otp');
+                            fd.append('phone', p);
+                            fd.append('patient_id', <?= json_encode($assignedPtId) ?>);
+                            fd.append('purpose', 'verification');
+
+                            fetch('index.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                                .then(function (r) { return r.json(); })
+                                .then(function (data) {
+                                    btnSendOtp.disabled = false;
+                                    btnSendOtp.textContent = 'Resend OTP';
+                                    if (data.ok) {
+                                        lastOtp = data.code || '';
+                                        if (smsBox && smsText) {
+                                            smsText.textContent = data.simulated_message || ('💬 Verification code: ' + lastOtp);
+                                            smsBox.style.display = 'block';
+                                        }
+                                        if (statusHint) {
+                                            statusHint.innerHTML = '<span style="color:var(--teal-700);">OTP code sent! Enter it in the verification field.</span>';
+                                        }
+                                        if (otpInput) otpInput.focus();
+                                    } else {
+                                        alert(data.message || 'Failed to send OTP.');
+                                    }
+                                })
+                                .catch(function () {
+                                    btnSendOtp.disabled = false;
+                                    btnSendOtp.textContent = 'Send OTP';
+                                    alert('Network error while requesting OTP.');
+                                });
+                        });
+                    }
+
+                    if (btnAutofill) {
+                        btnAutofill.addEventListener('click', function () {
+                            if (lastOtp && otpInput) {
+                                otpInput.value = lastOtp;
+                                if (btnVerifyOtp) btnVerifyOtp.click();
+                            }
+                        });
+                    }
+
+                    if (btnVerifyOtp && otpInput && phoneInput) {
+                        btnVerifyOtp.addEventListener('click', function () {
+                            var code = otpInput.value.trim();
+                            var p = phoneInput.value.trim();
+                            if (!code) {
+                                alert('Please enter the OTP code.');
+                                otpInput.focus();
+                                return;
+                            }
+                            btnVerifyOtp.disabled = true;
+                            btnVerifyOtp.textContent = 'Verifying...';
+
+                            var fd = new FormData();
+                            fd.append('action', 'ajax_verify_phone_otp');
+                            fd.append('phone', p);
+                            fd.append('code', code);
+                            fd.append('purpose', 'verification');
+
+                            fetch('index.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                                .then(function (r) { return r.json(); })
+                                .then(function (data) {
+                                    btnVerifyOtp.disabled = false;
+                                    btnVerifyOtp.textContent = 'Verify Code';
+                                    if (data.ok) {
+                                        if (verifiedInput) verifiedInput.value = '1';
+                                        if (statusHint) {
+                                            statusHint.innerHTML = '<strong style="color:var(--teal-700);">✓ Phone Verified Successfully</strong>';
+                                        }
+                                        if (smsBox) smsBox.style.display = 'none';
+                                        btnVerifyOtp.style.background = 'var(--teal-600)';
+                                        btnVerifyOtp.textContent = '✓ Verified';
+                                        btnVerifyOtp.disabled = true;
+                                    } else {
+                                        alert(data.message || 'Invalid or expired OTP code.');
+                                    }
+                                })
+                                .catch(function () {
+                                    btnVerifyOtp.disabled = false;
+                                    btnVerifyOtp.textContent = 'Verify Code';
+                                    alert('Network error while verifying OTP.');
+                                });
+                        });
+                    }
+
+                    // Enforce phone verification on form submission
+                    var modalForm = document.querySelector('form.modal');
+                    if (modalForm && verifiedInput) {
+                        modalForm.addEventListener('submit', function (e) {
+                            if (verifiedInput.value !== '1') {
+                                e.preventDefault();
+                                alert('Please ask for the patient\'s phone number and verify the OTP code before registering.');
+                                if (phoneInput && !phoneInput.value) phoneInput.focus();
+                                else if (otpInput) otpInput.focus();
+                                return false;
+                            }
+                        }, true);
                     }
                 })();
                 </script>
-                <div class="form-grid">
-                    <?= field('Phone', 'phone', '(000) 000-0000', 'text', $patientRow[2]) ?>
-                    <?= field('Insurance number', 'insurance', 'HIN-000-000', 'text', $patientRow[3]) ?>
-                </div>
-                <?= field('Address', 'address', 'Street, city, state, ZIP', 'text', $patientRow[7] ?? '') ?>
 
             <?php elseif ($isAppt): ?>
                 <?php if (($role ?? '') === 'Patient'):

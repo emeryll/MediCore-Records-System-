@@ -12,6 +12,7 @@ $unread = count(array_filter($notes, static fn ($n) => !$n[3]));
     <title><?= e($title) ?> · <?= e(APP_NAME) ?> Hospital Records System</title>
     <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="assets/css/style.css?v=<?= filemtime(__DIR__ . '/../assets/css/style.css') ?>">
+    <script src="assets/js/ph_address.js?v=<?= filemtime(__DIR__ . '/../assets/js/ph_address.js') ?>"></script>
 </head>
 <body>
 <div class="app-shell">
@@ -75,6 +76,10 @@ $unread = count(array_filter($notes, static fn ($n) => !$n[3]));
                     </div>
                 </details>
                 <div class="top-divider"></div>
+                <a href="<?= e(url(['page' => 'profile'])) ?>" class="btn btn-secondary btn-sm" style="display:flex; align-items:center; gap:6px; height:34px; padding:0 12px; font-size:12.5px; font-weight:600; text-decoration:none; margin-right:4px;">
+                    <?= icon('user', 14) ?>
+                    <span>My Profile</span>
+                </a>
                 <div class="avatar"><?= e(initials($name, 2)) ?></div>
                 <div class="user-copy">
                     <strong><?= e($name) ?></strong>

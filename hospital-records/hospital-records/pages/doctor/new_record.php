@@ -59,11 +59,19 @@ if (!$labOrders) {
     $labOrders = [['', 'Routine']];
 }
 
-$medOpts = array_values(array_unique(array_merge(
-    ['Select medication'],
-    array_column($state['crud']['medications'] ?? [], 0),
-    ['Lisinopril', 'Atorvastatin', 'Metformin', 'Amoxicillin', 'Paracetamol', 'Ibuprofen', 'Omeprazole', 'Amlodipine', 'Cetirizine', 'Azithromycin']
-)));
+$medOpts = [
+    'Select medication',
+    'Amlodipine',
+    'Amoxicillin',
+    'Atorvastatin',
+    'Azithromycin',
+    'Cetirizine',
+    'Ibuprofen',
+    'Lisinopril',
+    'Metformin',
+    'Omeprazole',
+    'Paracetamol',
+];
 
 $testOpts = [
     'Select test',
@@ -87,7 +95,7 @@ $titlePrefix = $isEditing ? 'Edit medical record' : 'New medical record';
     'Patient ID: ' . $ptId . ($ptDob !== '—' ? ' · Birthday: ' . $ptDob . ' · Age: ' . $ptAge : '') . ' · Attending: Dr. ' . e(current_user_name('Doctor')) . ' · ' . date('F j, Y')
 ) ?>
 
-<form class="record-form" method="post" action="index.php" enctype="application/x-www-form-urlencoded" id="clinicalRecordForm">
+<form class="record-form" method="post" action="index.php" enctype="application/x-www-form-urlencoded" id="clinicalRecordForm" onsubmit="return confirm('Are you sure about this action?');">
     <?= csrf_field() ?>
     <input type="hidden" name="action" value="save_record">
     <input type="hidden" name="patient" value="<?= e($patient) ?>">

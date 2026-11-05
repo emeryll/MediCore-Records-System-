@@ -213,6 +213,7 @@ foreach ($categories as $catKey => $catMeta):
                                 <td><?= e($u[4]) ?></td>
                                 <td>
                                     <div class="row-actions">
+                                        <a href="<?= e(url(['page' => 'users', 'modal' => 'User details', 'user_id' => $uId, 'email' => $u[1]])) ?>" style="display:inline-flex; align-items:center; gap:4px;"><?= icon('eye', 15) ?> Details</a>
                                         <a href="<?= e(url(['page' => 'users', 'modal' => 'Edit user', 'email' => $u[1]])) ?>"><?= icon('edit', 15) ?> Edit</a>
                                         <?= post_button('', 'toggle_user', ['email' => $u[1]], [
                                             'plain' => true,

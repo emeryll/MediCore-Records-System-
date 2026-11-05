@@ -14,6 +14,7 @@ function nav_for(string $role): array
             ['Sales Records', 'card', 'sales-records'],
             ['Archive', 'clipboard', 'archive'],
             ['Audit Logs', 'history', 'audit-logs'],
+            ['Profile', 'patient', 'profile'],
         ],
         'Staff' => [
             ['Dashboard', 'grid', 'dashboard'],
@@ -21,6 +22,7 @@ function nav_for(string $role): array
             ['Appointments', 'calendar', 'appointments'],
             ['Admissions', 'clipboard', 'admissions'],
             ['Rooms', 'bed', 'staff-rooms'],
+            ['Profile', 'patient', 'profile'],
         ],
         'Cashier' => [
             ['Dashboard', 'grid', 'dashboard'],
@@ -28,6 +30,7 @@ function nav_for(string $role): array
             ['Process Payment', 'clipboard', 'process-payment'],
             ['Payment History', 'history', 'payment-history'],
             ['Daily Report', 'printer', 'daily-report'],
+            ['Profile', 'patient', 'profile'],
         ],
         'Patient' => [
             ['Home', 'grid', 'dashboard'],
@@ -43,6 +46,7 @@ function nav_for(string $role): array
             ['My Appointments', 'calendar', 'my-appointments'],
             ['Patients', 'patient', 'patients'],
             ['Lab Results', 'flask', 'lab-results'],
+            ['Profile', 'patient', 'profile'],
         ],
     };
 }
@@ -60,6 +64,7 @@ function routes_for(string $role): array
             'sales-records' => 'pages/admin/sales.php',
             'archive'       => 'pages/admin/archive.php',
             'audit-logs'    => 'pages/admin/audit.php',
+            'profile'       => 'pages/shared/my_profile.php',
         ],
         'Staff' => [
             'dashboard'    => 'pages/staff/dashboard.php',
@@ -68,6 +73,7 @@ function routes_for(string $role): array
             'admissions'   => 'pages/staff/admissions.php',
             'staff-rooms'  => 'pages/staff/rooms.php',
             'book'         => 'pages/shared/book.php',
+            'profile'      => 'pages/shared/my_profile.php',
         ],
         'Cashier' => [
             'dashboard'       => 'pages/cashier/dashboard.php',
@@ -75,6 +81,7 @@ function routes_for(string $role): array
             'process-payment' => 'pages/cashier/process_payment.php',
             'payment-history' => 'pages/cashier/payment_history.php',
             'daily-report'    => 'pages/cashier/daily_report.php',
+            'profile'         => 'pages/shared/my_profile.php',
         ],
         'Patient' => [
             'dashboard'     => 'pages/patient/home.php',
@@ -84,13 +91,14 @@ function routes_for(string $role): array
             'history'       => 'pages/patient/history.php',
             'prescriptions' => 'pages/patient/prescriptions.php',
             'bills'         => 'pages/patient/bills.php',
-            'profile'       => 'pages/patient/profile.php',
+            'profile'       => 'pages/shared/my_profile.php',
         ],
         default => [
             'dashboard'       => 'pages/doctor/dashboard.php',
             'my-appointments' => 'pages/doctor/appointments.php',
             'patients'        => 'pages/shared/patients.php',
             'lab-results'     => 'pages/doctor/lab_results.php',
+            'profile'         => 'pages/shared/my_profile.php',
         ],
     };
 }
@@ -219,7 +227,6 @@ function seed_crud(): array
     return [
         'departments' => [],
         'rooms'       => [],
-        'medications' => [],
     ];
 }
 
