@@ -2,16 +2,16 @@
 declare(strict_types=1);
 
 /* ---------------------------------------------------------------
- * Booking helpers: doctor schedules, slot availability, upcoming list
+ * Booking helpers: doctor schedules, slot availability, cutoff rules
  * ------------------------------------------------------------- */
 
 /** Statuses of an appointment that can still be rescheduled or cancelled. */
-const BOOKABLE_STATUSES = ['Confirmed', 'Waiting', 'Upcoming'];
+const BOOKABLE_STATUSES = ['Scheduled', 'Confirmed', 'Waiting', 'Upcoming'];
 
 function doctor_by_name(string $name): ?array
 {
     foreach (doctors_data() as $d) {
-        if (strcasecmp($d[0], $name) === 0) {
+        if (strcasecmp((string) $d[0], $name) === 0) {
             return $d;
         }
     }
@@ -40,13 +40,16 @@ function parse_workdays(string $text): array
             $days[] = $map[$key];
         }
     }
-    return $days;
+    return $days ?: [1, 2, 3, 4, 5];
 }
 
-/** Half-hour slots, 9:00 – 16:30, with a lunch break at 12:00. */
-function booking_slots(): array
+/** Default half-hour slots, 08:00 – 16:30, with lunch break at 12:00. */
+function booking_slots(?array $doctor = null): array
 {
-    return ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '16:30'];
+    if ($doctor && !empty($doctor['schedule']['slots']) && is_array($doctor['schedule']['slots'])) {
+        return array_values($doctor['schedule']['slots']);
+    }
+    return ['08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '16:30'];
 }
 
 function slot_label(string $slot): string
@@ -60,20 +63,36 @@ function normalize_slot(string $time): string
     return $ts === false ? $time : date('H:i', $ts);
 }
 
-/** Earliest and latest bookable dates (Y-m-d). */
-function booking_window(): array
+/** Earliest and latest bookable dates (Y-m-d). Allows today for walk-in/staff, +1 to +60 days. */
+function booking_window(bool $allowToday = false): array
 {
-    return [date('Y-m-d', strtotime('+1 day')), date('Y-m-d', strtotime('+60 days'))];
+    return [$allowToday ? date('Y-m-d') : date('Y-m-d', strtotime('+1 day')), date('Y-m-d', strtotime('+60 days'))];
 }
 
-/** Does this patient already have an active appointment (any doctor) at this exact date and time? */
+/** Can a patient cancel or reschedule this appointment (24-hour cutoff rule, Section 4.2)? */
+function can_patient_modify_appointment(array $appt): bool
+{
+    $status = (string) ($appt[3] ?? '');
+    if (!in_array($status, BOOKABLE_STATUSES, true)) {
+        return false;
+    }
+    $dateStr = (string) ($appt[7] ?? '');
+    $timeStr = normalize_slot((string) ($appt[0] ?? '09:00'));
+    $apptTs  = strtotime($dateStr . ' ' . $timeStr);
+    if ($apptTs === false) {
+        return true;
+    }
+    return ($apptTs - time()) >= (24 * 3600);
+}
+
+/** Does this patient already have an active appointment (with any doctor) at this exact date and time? */
 function patient_has_slot(array $state, string $patient, string $ymd, string $slot, int $ignoreIdx = -1): bool
 {
     if ($patient === '') {
         return false;
     }
-    foreach ($state['appointments'] as $i => $a) {
-        if ($i === $ignoreIdx || ($a[3] ?? '') === 'Cancelled' || ($a[1] ?? '') !== $patient) {
+    foreach ($state['appointments'] ?? [] as $i => $a) {
+        if ($i === $ignoreIdx || in_array($a[3] ?? '', ['Cancelled', 'No-show'], true) || strcasecmp((string) ($a[1] ?? ''), $patient) !== 0) {
             continue;
         }
         if (date('Y-m-d', strtotime((string) ($a[7] ?? 'today')) ?: 0) === $ymd
@@ -84,17 +103,17 @@ function patient_has_slot(array $state, string $patient, string $ymd, string $sl
     return false;
 }
 
-/** Is this exact slot taken (by a real appointment or the patient's own visit)? */
+/** Is this exact slot taken (by another appointment with this doctor or the patient's own visit)? */
 function slot_booked(array $state, string $doctor, string $ymd, string $slot, int $ignoreIdx = -1, string $patient = ''): bool
 {
     if (patient_has_slot($state, $patient, $ymd, $slot, $ignoreIdx)) {
         return true;
     }
-    foreach ($state['appointments'] as $i => $a) {
-        if ($i === $ignoreIdx || ($a[3] ?? '') === 'Cancelled') {
+    foreach ($state['appointments'] ?? [] as $i => $a) {
+        if ($i === $ignoreIdx || in_array($a[3] ?? '', ['Cancelled', 'No-show'], true)) {
             continue;
         }
-        if (($a[5] ?? '') === $doctor
+        if (strcasecmp((string) ($a[5] ?? ''), $doctor) === 0
             && date('Y-m-d', strtotime((string) ($a[7] ?? 'today')) ?: 0) === $ymd
             && normalize_slot((string) $a[0]) === $slot) {
             return true;
@@ -104,62 +123,78 @@ function slot_booked(array $state, string $doctor, string $ymd, string $slot, in
 }
 
 /**
- * Status of a calendar day for a doctor.
- * Returns ['status' => 'past'|'off'|'full'|'open', 'free' => int]
+ * Status of a calendar day for a doctor (respects doctor's schedule & blocked leave dates).
+ * Returns ['status' => 'past'|'off'|'blocked'|'full'|'open', 'free' => int, 'reason' => string]
  */
-function day_availability(array $state, array $doctor, string $ymd, int $ignoreIdx = -1, string $patient = ''): array
+function day_availability(array $state, array $doctor, string $ymd, int $ignoreIdx = -1, string $patient = '', bool $allowToday = false): array
 {
-    [$min, $max] = booking_window();
+    [$min, $max] = booking_window($allowToday);
     if ($ymd < $min || $ymd > $max) {
-        return ['status' => 'past', 'free' => 0];
+        return ['status' => 'past', 'free' => 0, 'reason' => ''];
     }
-    $weekday = (int) date('N', strtotime($ymd));
-    if (!in_array($weekday, parse_workdays($doctor[4]), true)) {
-        return ['status' => 'off', 'free' => 0];
+
+    // Check doctor's blocked/leave dates
+    $sched = $doctor['schedule'] ?? [];
+    foreach ($sched['blocked_dates'] ?? [] as $bd) {
+        $bDate = is_array($bd) ? (string) ($bd['date'] ?? '') : (string) $bd;
+        if ($bDate === $ymd) {
+            return ['status' => 'off', 'free' => 0, 'reason' => (string) ($bd['reason'] ?? 'Doctor on leave')];
+        }
     }
-    $free = 0;
-    foreach (booking_slots() as $s) {
-        if (!slot_booked($state, $doctor[0], $ymd, $s, $ignoreIdx, $patient)) {
+
+    $weekday  = (int) date('N', strtotime($ymd));
+    $workdays = (!empty($sched['days']) && is_array($sched['days']))
+        ? array_map('intval', $sched['days'])
+        : parse_workdays((string) ($doctor[4] ?? 'Mon – Fri'));
+
+    if (!in_array($weekday, $workdays, true)) {
+        return ['status' => 'off', 'free' => 0, 'reason' => 'Rest day'];
+    }
+
+    $slots = booking_slots($doctor);
+    $free  = 0;
+    foreach ($slots as $s) {
+        if (!slot_booked($state, (string) $doctor[0], $ymd, $s, $ignoreIdx, $patient)) {
             $free++;
         }
     }
-    return ['status' => $free > 0 ? 'open' : 'full', 'free' => $free];
+    return ['status' => $free > 0 ? 'open' : 'full', 'free' => $free, 'reason' => ''];
 }
 
 /** Can this slot be booked right now? */
-function slot_available(array $state, array $doctor, string $ymd, string $slot, int $ignoreIdx = -1, string $patient = ''): bool
+function slot_available(array $state, array $doctor, string $ymd, string $slot, int $ignoreIdx = -1, string $patient = '', bool $allowToday = false): bool
 {
-    if (!in_array($slot, booking_slots(), true)) {
+    $slots = booking_slots($doctor);
+    if (!in_array($slot, $slots, true)) {
         return false;
     }
-    if (day_availability($state, $doctor, $ymd, $ignoreIdx, $patient)['status'] !== 'open') {
+    if (day_availability($state, $doctor, $ymd, $ignoreIdx, $patient, $allowToday)['status'] !== 'open') {
         return false;
     }
-    return !slot_booked($state, $doctor[0], $ymd, $slot, $ignoreIdx, $patient);
+    return !slot_booked($state, (string) $doctor[0], $ymd, $slot, $ignoreIdx, $patient);
 }
 
 /** Gradient avatar standing in for a doctor's photo. */
 function doctor_photo(string $name, string $class = ''): string
 {
     $palette = [['#0f766e', '#14b8a6'], ['#1e3a5f', '#3b82f6'], ['#7c3aed', '#a78bfa'], ['#b45309', '#f59e0b'], ['#be123c', '#fb7185']];
-    [$a, $b] = $palette[crc32($name) % count($palette)];
+    [$a, $b] = $palette[abs(crc32($name)) % count($palette)];
     return '<span class="bk-photo ' . e($class) . '" style="background:linear-gradient(135deg,' . $a . ',' . $b . ')">'
         . e(initials(str_replace('Dr. ', '', $name), 2)) . '</span>';
 }
 
 /**
- * "Upcoming appointments" list with Reschedule and Cancel actions.
- * Patients see their own; staff see everyone's.
+ * "Upcoming appointments" list with Reschedule and Cancel actions (enforces 24h cutoff for patients).
  */
 function upcoming_appointments_html(array $state, string $role): string
 {
     $me   = current_user_name('Patient');
     $rows = [];
-    foreach ($state['appointments'] as $idx => $a) {
-        if (!in_array($a[3], BOOKABLE_STATUSES, true)) {
+    foreach ($state['appointments'] ?? [] as $idx => $a) {
+        if (!in_array($a[3] ?? '', BOOKABLE_STATUSES, true)) {
             continue;
         }
-        if ($role === 'Patient' && $a[1] !== $me) {
+        if ($role === 'Patient' && strcasecmp((string) ($a[1] ?? ''), $me) !== 0) {
             continue;
         }
         $rows[$idx] = $a;
@@ -172,11 +207,15 @@ function upcoming_appointments_html(array $state, string $role): string
         <div class="panel-head">
             <div>
                 <h2>Upcoming appointments</h2>
-                <p><?= count($rows) ?> scheduled visit<?= count($rows) !== 1 ? 's' : '' ?> you can reschedule or cancel</p>
+                <p><?= count($rows) ?> scheduled visit<?= count($rows) !== 1 ? 's' : '' ?><?= $role === 'Patient' ? ' · Cancel or reschedule up to 24 hours before visit' : '' ?></p>
             </div>
         </div>
         <div class="bk-upcoming-list">
-            <?php foreach ($rows as $idx => $a): ?>
+            <?php foreach ($rows as $idx => $a):
+                $canMod = $role !== 'Patient' || can_patient_modify_appointment($a);
+                $ptRec  = find_patient_record($state, (string) ($a[1] ?? ''));
+                $isProv = is_provisional_patient($ptRec) || !empty($a['is_provisional']);
+            ?>
                 <article class="bk-upcoming-row">
                     <div class="pt-appt-date-box">
                         <span><?= e(strtoupper(date('M', strtotime($a[7])))) ?></span>
@@ -185,13 +224,19 @@ function upcoming_appointments_html(array $state, string $role): string
                     </div>
                     <div class="bk-upcoming-info">
                         <strong><?= e($a[5]) ?> <span class="pt-dept-tag"><?= e($a[6]) ?></span></strong>
-                        <?php if ($role !== 'Patient'): ?><p>Patient: <b><?= e($a[1]) ?></b></p><?php endif; ?>
+                        <?php if ($role !== 'Patient'): ?>
+                            <p>Patient: <b><?= e($a[1]) ?></b> <?= $isProv ? badge('Provisional', 'warning') : '' ?></p>
+                        <?php endif; ?>
                         <p><?= e($a[4] !== '' ? $a[4] : $a[2]) ?></p>
                     </div>
                     <?= badge($a[3], status_tone($a[3])) ?>
                     <div class="bk-upcoming-actions">
-                        <?= button('Reschedule', ['variant' => 'secondary', 'icon' => 'calendar', 'href' => url(['page' => 'book', 'step' => 2, 'reschedule' => $idx])]) ?>
-                        <?= post_button('Cancel', 'cancel_appt', ['idx' => (string) $idx], ['variant' => 'secondary', 'class' => 'btn-cancel']) ?>
+                        <?php if ($canMod): ?>
+                            <?= button('Reschedule', ['variant' => 'secondary', 'icon' => 'calendar', 'href' => url(['page' => 'book', 'step' => 2, 'reschedule' => $idx])]) ?>
+                            <?= post_button('Cancel', 'cancel_appt', ['idx' => (string) $idx], ['variant' => 'secondary', 'class' => 'btn-cancel', 'confirm_msg' => 'Cancel this appointment?']) ?>
+                        <?php else: ?>
+                            <span style="font-size:12px; color:var(--gray-500);">Within 24h cutoff</span>
+                        <?php endif; ?>
                     </div>
                 </article>
             <?php endforeach; ?>

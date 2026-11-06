@@ -1,10 +1,13 @@
 <?php
+declare(strict_types=1);
+
 $idInfo    = resolve_patient_identity($state);
 $ptName    = $idInfo['name'];
 $firstName = explode(' ', $ptName)[0];
 $mob       = $_GET['mobile'] ?? null;
 $myPtId    = $idInfo['id'];
 $ptRecord  = $idInfo['record'] ?? find_patient_record($state, $ptName);
+$myMrn     = $ptRecord ? patient_mrn_display($ptRecord) : (str_starts_with($myPtId, 'MRN-') ? $myPtId : 'MRN-' . preg_replace('/[^0-9]/', '', $myPtId));
 $myDob     = format_birthdate($ptRecord[1] ?? '');
 $myAge     = patient_age_label($myDob, false, '—');
 
@@ -13,40 +16,40 @@ $nextAppt    = null;
 $nextApptIdx = null;
 foreach ($state['appointments'] as $idx => $a) {
     if (matches_patient_identity($idInfo, $a[1] ?? '', $a[8] ?? null)
-        && in_array($a[3] ?? '', ['Confirmed', 'Waiting', 'Upcoming', 'In progress'], true)) {
+        && in_array($a[3] ?? '', ['Scheduled', 'Checked-in', 'In consultation', 'Confirmed', 'Waiting', 'Upcoming', 'In progress'], true)) {
         $nextAppt    = $a;
         $nextApptIdx = $idx;
         break;
     }
 }
 
-// Collect active prescriptions from medical records and relational prescriptions
+// Collect active prescriptions
 $prescriptions = patient_prescriptions($state, $ptName, $myPtId);
 
 // Find unpaid/pending bills for this patient
 $unpaidBills = [];
 foreach ($state['bills'] as $bIdx => $b) {
     if (matches_patient_identity($idInfo, $b[0] ?? '', null) && ($b[2] ?? '') !== 'Paid') {
-        $unpaidBills[] = ['idx' => $bIdx, 'row' => $b];
+        $unpaidBills[] = ['idx' => $bIdx, 'row' => $b, 'norm' => normalize_bill_row($b, $bIdx)];
     }
 }
 ?>
 <div class="pt-greeting-banner">
     <div>
-        <p class="eyebrow">Patient Portal · ID <?= e($myPtId) ?><?= $myDob !== '—' ? ' · Birthday: ' . e($myDob) . ' (' . e($myAge) . ')' : '' ?></p>
-        <h1>Good morning, <?= e($firstName) ?> 👋</h1>
-        <p>Here is a summary of your upcoming care, active medications, and billing.</p>
+        <p class="eyebrow">Patient Portal · MRN <?= e($myMrn ?: $myPtId) ?><?= $myDob !== '—' ? ' · Birthday: ' . e($myDob) . ' (' . e($myAge) . ')' : '' ?></p>
+        <h1>Good day, <?= e($firstName) ?> 👋</h1>
+        <p>Welcome to your West Metro Medical Center patient portal — view your upcoming appointments, prescriptions, and billing statements.</p>
     </div>
-    <?= button('Book appointment', ['icon' => 'plus', 'href' => url(['page' => 'appointments', 'modal' => 'Book appointment', 'mobile' => $mob])]) ?>
+    <?= button('Book appointment', ['icon' => 'plus', 'href' => url(['page' => 'book', 'step' => 1, 'mobile' => $mob])]) ?>
 </div>
 
 <?php if ($unpaidBills): ?>
-    <?php $firstUnpaid = $unpaidBills[0]['row']; ?>
+    <?php $firstUnpaid = $unpaidBills[0]['norm']; ?>
     <div class="pt-bill-alert" role="alert">
         <div class="pt-bill-alert-icon"><?= icon('card', 22) ?></div>
         <div class="pt-bill-alert-copy">
-            <strong>Unpaid bill alert · <?= e($firstUnpaid[1]) ?> due</strong>
-            <p>You have <?= count($unpaidBills) ?> outstanding invoice<?= count($unpaidBills) > 1 ? 's' : '' ?> issued on <?= e($firstUnpaid[3]) ?>.</p>
+            <strong>Unpaid bill alert · <?= e(format_money($firstUnpaid['balance'])) ?> balance due</strong>
+            <p>You have <?= count($unpaidBills) ?> outstanding invoice<?= count($unpaidBills) > 1 ? 's' : '' ?> issued on <?= e($firstUnpaid['issued']) ?>.</p>
         </div>
         <?= button('View bill', ['variant' => 'secondary', 'href' => url(['page' => 'bills', 'detail' => 'bill', 'bill' => $unpaidBills[0]['idx'], 'mobile' => $mob])]) ?>
     </div>
@@ -57,8 +60,8 @@ foreach ($state['bills'] as $bIdx => $b) {
     <section class="panel pt-card">
         <div class="panel-head">
             <div>
-                <h2>Next appointment</h2>
-                <p>Your upcoming scheduled visit</p>
+                <h2>Upcoming appointment</h2>
+                <p>Your next scheduled visit at West Metro Medical Center</p>
             </div>
             <a class="text-link" href="<?= e(url(['page' => 'appointments', 'mobile' => $mob])) ?>">All appointments <?= icon('arrow', 14) ?></a>
         </div>
@@ -73,10 +76,10 @@ foreach ($state['bills'] as $bIdx => $b) {
                 <div class="pt-appt-info">
                     <div class="pt-appt-top">
                         <?= badge($nextAppt[3], status_tone($nextAppt[3])) ?>
-                        <span class="pt-dept-tag"><?= e($nextAppt[6] ?? 'Cardiology') ?></span>
+                        <span class="pt-dept-tag"><?= e($nextAppt[6] ?? 'Outpatient Clinic') ?></span>
                     </div>
                     <h3><?= e($nextAppt[2]) ?></h3>
-                    <p class="pt-doctor-line"><?= icon('patient', 15) ?> <strong><?= e($nextAppt[5] ?? 'Attending Physician') ?></strong> · Main Hospital</p>
+                    <p class="pt-doctor-line"><?= icon('patient', 15) ?> <strong><?= e($nextAppt[5] ?? 'Attending Physician') ?></strong> · West Metro Medical Center</p>
                     <?php if (!empty($nextAppt[4])): ?>
                         <p class="pt-reason-line">Reason: <em><?= e($nextAppt[4]) ?></em></p>
                     <?php endif; ?>
@@ -87,7 +90,7 @@ foreach ($state['bills'] as $bIdx => $b) {
                 <?= icon('calendar', 28) ?>
                 <strong>No upcoming appointments</strong>
                 <p>Need to see a doctor? Schedule your next visit online.</p>
-                <?= button('Book appointment', ['icon' => 'plus', 'href' => url(['page' => 'appointments', 'modal' => 'Book appointment', 'mobile' => $mob])]) ?>
+                <?= button('Book appointment', ['icon' => 'plus', 'href' => url(['page' => 'book', 'step' => 1, 'mobile' => $mob])]) ?>
             </div>
         <?php endif; ?>
     </section>

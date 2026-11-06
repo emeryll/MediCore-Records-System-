@@ -18,5 +18,5 @@ return [
     'smtp_user'       => 'evangelistameryll@gmail.com',
     'smtp_pass'       => 'ktcfcpqjcgrlcgkw',
     'from_email'      => 'evangelistameryll@gmail.com',
-    'from_name'       => 'MediCore Hospital Records',
+    'from_name'       => 'West Metro Medical Center',
 ];

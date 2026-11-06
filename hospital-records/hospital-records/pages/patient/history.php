@@ -1,16 +1,22 @@
 <?php
+declare(strict_types=1);
+
 $idInfo  = resolve_patient_identity($state);
 $ptName  = $idInfo['name'];
 $ptId    = $idInfo['id'];
+$ptRec   = $idInfo['record'] ?? find_patient_record($state, $ptName);
+$myMrn   = $ptRec ? patient_mrn_display($ptRec) : $ptId;
 $records = patient_medical_records($state, $ptName, $ptId);
 $open    = isset($_GET['open']) ? (int) $_GET['open'] : 0;
 $mob     = $_GET['mobile'] ?? null;
 $ptLabs  = patient_lab_results($state, $ptName, $ptId);
+
+$paged = paginate_rows($records, 5, 'p');
 ?>
 <?= page_title(
     'Medical History',
-    'Read-only timeline of your past hospital visits, diagnoses, prescriptions, and lab results.',
-    badge('Patient ID: ' . $ptId, 'neutral')
+    'Read-only timeline of your past hospital visits, diagnoses, notes, and lab results.',
+    badge('MRN: ' . ($myMrn ?: $ptId), 'neutral')
 ) ?>
 
 <div class="panel">
@@ -22,17 +28,18 @@ $ptLabs  = patient_lab_results($state, $ptName, $ptId);
     </div>
 
     <div class="visit-history">
-        <?php foreach ($records as $i => $v): $isOpen = ($open === $i); ?>
-            <?php
+        <?php foreach ($paged['rows'] as $localIdx => $v):
+            $i = $paged['offset'] + $localIdx;
+            $isOpen = ($open === $i);
             $primaryDiag = !empty($v['diagnoses'][0]) ? ($v['diagnoses'][0][1] ?: $v['diagnoses'][0][0]) : 'General assessment';
-            ?>
+        ?>
             <div class="history-entry <?= $isOpen ? 'open' : '' ?>">
-                <a href="<?= e(url(['page' => 'history', 'open' => $isOpen ? -1 : $i, 'mobile' => $mob])) ?>">
+                <a href="<?= e(url(['page' => 'history', 'open' => $isOpen ? -1 : $i, 'p' => $paged['page'], 'mobile' => $mob])) ?>">
                     <span class="history-marker"><?= icon('clipboard', 16) ?></span>
                     <div>
                         <time><?= e($v['date'] ?? '') ?> · <?= e($v['doctor'] ?? 'Attending Physician') ?></time>
                         <strong><?= e($v['visit_type'] ?? 'Consultation') ?> — <?= e($v['complaint'] ?: 'Routine checkup') ?></strong>
-                        <p>Diagnosis: <?= e($primaryDiag) ?></p>
+                        <p>Diagnosis: <?= e($primaryDiag) ?><?= !empty($v['follow_up']) ? ' · Follow-up: ' . e($v['follow_up']) : '' ?></p>
                     </div>
                     <?= badge($v['status'] ?? 'Completed', ($v['status'] ?? '') === 'Draft' ? 'warning' : 'success') ?>
                     <?= icon('down', 17) ?>
@@ -48,6 +55,12 @@ $ptLabs  = patient_lab_results($state, $ptName, $ptId);
                             <span>Doctor's clinical notes</span>
                             <p class="history-notes"><?= e($v['notes'] ?: 'No additional notes recorded.') ?></p>
                         </div>
+                        <?php if (!empty($v['follow_up'])): ?>
+                            <div>
+                                <span>Recommended follow-up date</span>
+                                <strong><?= e($v['follow_up']) ?></strong>
+                            </div>
+                        <?php endif; ?>
                         <div>
                             <span>Diagnoses (ICD-10)</span>
                             <?php if (!empty($v['diagnoses'])): ?>
@@ -115,4 +128,8 @@ $ptLabs  = patient_lab_results($state, $ptName, $ptId);
             </div>
         <?php endif; ?>
     </div>
+
+    <?php if ($records): ?>
+        <?= pagination_bar('visit record', $paged['total'], $paged['page'], $paged['pages'], 'p') ?>
+    <?php endif; ?>
 </div>

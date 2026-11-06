@@ -20,11 +20,12 @@ function db(): PDO
         @mkdir($dbDir, 0775, true);
     }
     $realDir    = realpath($dbDir) ?: $dbDir;
-    $sqlitePath = $realDir . DIRECTORY_SEPARATOR . 'medicore.sqlite';
+    $sqlitePath = getenv('MEDICORE_SQLITE_PATH') ?: ($realDir . DIRECTORY_SEPARATOR . 'medicore.sqlite');
 
     $driver = 'sqlite';
     // 1. Primary: XAMPP MySQL (127.0.0.1:3306 -> `medicore_records` in phpMyAdmin)
-    if (in_array('mysql', PDO::getAvailableDrivers(), true)) {
+    //    Set MEDICORE_DB_DRIVER=sqlite to skip MySQL entirely (e.g. for isolated testing).
+    if (getenv('MEDICORE_DB_DRIVER') !== 'sqlite' && in_array('mysql', PDO::getAvailableDrivers(), true)) {
         try {
             $host = getenv('MEDICORE_DB_HOST') ?: '127.0.0.1';
             $port = getenv('MEDICORE_DB_PORT') ?: '3306';
@@ -100,6 +101,9 @@ function db_init_schema(PDO $pdo, string $driver): void
         "street VARCHAR(255) NOT NULL DEFAULT ''",
         "postal_code VARCHAR(30) NOT NULL DEFAULT ''",
         "sex VARCHAR(30) NOT NULL DEFAULT 'Not specified'",
+        "force_password_change INT NOT NULL DEFAULT 0",
+        "set_password_token VARCHAR(120) NOT NULL DEFAULT ''",
+        "set_password_expires_at BIGINT NOT NULL DEFAULT 0",
     ];
     foreach ($accountCols as $colDef) {
         try {
@@ -207,6 +211,34 @@ function db_init_schema(PDO $pdo, string $driver): void
         "ALTER TABLE bills ADD COLUMN paid_amount VARCHAR(40) NOT NULL DEFAULT '0'",
         "ALTER TABLE bills ADD COLUMN items_json LONGTEXT DEFAULT NULL",
         "ALTER TABLE patients ADD COLUMN email VARCHAR(150) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients ADD COLUMN mrn VARCHAR(30) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients ADD COLUMN registration_status VARCHAR(30) NOT NULL DEFAULT 'Registered'",
+        "ALTER TABLE patients ADD COLUMN first_name VARCHAR(80) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients ADD COLUMN middle_name VARCHAR(80) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients ADD COLUMN last_name VARCHAR(80) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients ADD COLUMN id_checked INT NOT NULL DEFAULT 0",
+        "ALTER TABLE patients ADD COLUMN consent_given INT NOT NULL DEFAULT 0",
+        "ALTER TABLE patients ADD COLUMN created_by VARCHAR(120) NOT NULL DEFAULT 'Staff'",
+        "ALTER TABLE patients ADD COLUMN upgraded_by VARCHAR(120) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients ADD COLUMN upgraded_at VARCHAR(50) NOT NULL DEFAULT ''",
+        "ALTER TABLE admissions ADD COLUMN admission_id VARCHAR(30) NOT NULL DEFAULT ''",
+        "ALTER TABLE admissions ADD COLUMN mrn VARCHAR(30) NOT NULL DEFAULT ''",
+        "ALTER TABLE admissions ADD COLUMN department VARCHAR(100) NOT NULL DEFAULT 'Internal Medicine'",
+        "ALTER TABLE admissions ADD COLUMN bed_label VARCHAR(50) NOT NULL DEFAULT 'Bed A'",
+        "ALTER TABLE admissions ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'Admitted'",
+        "ALTER TABLE admissions ADD COLUMN clinical_notes_json LONGTEXT DEFAULT NULL",
+        "ALTER TABLE admissions ADD COLUMN discharge_order TEXT DEFAULT NULL",
+        "ALTER TABLE admissions ADD COLUMN final_diagnosis TEXT DEFAULT NULL",
+        "ALTER TABLE admissions ADD COLUMN billing_clearance VARCHAR(30) NOT NULL DEFAULT 'Pending'",
+        "ALTER TABLE admissions ADD COLUMN clearance_reason TEXT DEFAULT NULL",
+        "ALTER TABLE admissions ADD COLUMN cleared_by VARCHAR(120) NOT NULL DEFAULT ''",
+        "ALTER TABLE discharges ADD COLUMN mrn VARCHAR(30) NOT NULL DEFAULT ''",
+        "ALTER TABLE discharges ADD COLUMN bed_label VARCHAR(50) NOT NULL DEFAULT 'Bed A'",
+        "ALTER TABLE discharges ADD COLUMN doctor_name VARCHAR(150) NOT NULL DEFAULT ''",
+        "ALTER TABLE discharges ADD COLUMN admitted_date VARCHAR(40) NOT NULL DEFAULT ''",
+        "ALTER TABLE discharges ADD COLUMN discharge_type VARCHAR(80) NOT NULL DEFAULT 'Recovered / Improved'",
+        "ALTER TABLE discharges ADD COLUMN final_diagnosis TEXT DEFAULT NULL",
+        "ALTER TABLE discharges ADD COLUMN length_of_stay INT NOT NULL DEFAULT 1",
     ] as $altBillSql) {
         try {
             $pdo->exec($altBillSql);
@@ -681,16 +713,9 @@ function db_create_account(array $input, bool $fromAdmin = false): array
 
     $prefix = strtoupper(substr($userId, 0, 1));
 
-    // Public self-registration cannot create Doctor (D), Staff (S), or Cashier (C) accounts
-    if (!$fromAdmin && in_array($prefix, ['D', 'S', 'C'], true)) {
-        return ['error' => 'Doctor (D), Staff (S), and Cashier (C) accounts can only be created by the System Administrator in the Admin portal.'];
-    }
-
-    // STRICT ONE-TIME ADMIN RULE: Once an A-ID is used, no A-ID can EVER be used again!
-    if ($prefix === 'A' || strcasecmp((string) ($input['role'] ?? ''), 'Admin') === 0 || strcasecmp((string) ($input['role'] ?? ''), 'Administrator') === 0) {
-        if ($fromAdmin || db_admin_claimed()) {
-            return ['error' => 'An Administrator account (A-ID) has already been registered. The A ID can never be used again.'];
-        }
+    // Public self-registration cannot create Admin (A), Doctor (D), Staff (S), or Cashier (C) accounts
+    if (!$fromAdmin && in_array($prefix, ['A', 'D', 'S', 'C'], true)) {
+        return ['error' => 'Doctor (D), Staff (S), Cashier (C), and Administrator (A) accounts can only be created by the System Administrator in the Admin portal.'];
     }
 
     $role = match ($prefix) {
@@ -822,9 +847,99 @@ function db_create_account(array $input, bool $fromAdmin = false): array
 }
 
 /**
+ * Generate the next unique Medical Record Number (MRN-1001, MRN-1002, ...).
+ * Issued ONLY when a patient is fully registered (Section 1 & 2).
+ */
+function db_next_mrn(): string
+{
+    $pdo    = db();
+    $maxNum = 1000;
+    $used   = [];
+
+    $scan = static function (string $val) use (&$maxNum, &$used): void {
+        $val = strtoupper(trim($val));
+        if ($val === '' || str_starts_with($val, 'PROV-')) {
+            return;
+        }
+        $used[$val] = true;
+        if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $val, $m)) {
+            $num = (int) $m[1];
+            if ($num < 1000) {
+                $num += 1000;
+            }
+            $maxNum = max($maxNum, $num);
+            $used['MRN-' . str_pad((string) $num, 4, '0', STR_PAD_LEFT)] = true;
+        }
+    };
+
+    try {
+        foreach ($pdo->query('SELECT patient_id, mrn FROM patients')->fetchAll() as $r) {
+            $scan((string) ($r['patient_id'] ?? ''));
+            $scan((string) ($r['mrn'] ?? ''));
+        }
+    } catch (Throwable) {}
+
+    foreach ($_SESSION['state']['patients'] ?? [] as $pt) {
+        $scan((string) ($pt[8] ?? ''));
+        $scan((string) ($pt['mrn'] ?? ''));
+    }
+
+    $next = $maxNum + 1;
+    do {
+        $cand = 'MRN-' . str_pad((string) $next, 4, '0', STR_PAD_LEFT);
+        $next++;
+    } while (isset($used[$cand]));
+
+    return $cand;
+}
+
+/**
+ * Generate an internal temporary reference key for a Provisional patient (PROV-1001, ...).
+ * Provisional patients have NO MRN until full registration is completed.
+ */
+function db_next_provisional_ref(): string
+{
+    $pdo    = db();
+    $maxNum = 1000;
+    $used   = [];
+
+    $scan = static function (string $val) use (&$maxNum, &$used): void {
+        $val = strtoupper(trim($val));
+        if ($val === '') {
+            return;
+        }
+        $used[$val] = true;
+        if (preg_match('/^PROV-?0*(\d+)$/i', $val, $m)) {
+            $num = (int) $m[1];
+            if ($num < 1000) {
+                $num += 1000;
+            }
+            $maxNum = max($maxNum, $num);
+        }
+    };
+
+    try {
+        foreach ($pdo->query('SELECT patient_id FROM patients')->fetchAll() as $r) {
+            $scan((string) ($r['patient_id'] ?? ''));
+        }
+    } catch (Throwable) {}
+
+    foreach ($_SESSION['state']['patients'] ?? [] as $pt) {
+        $scan((string) ($pt[8] ?? ''));
+    }
+
+    $next = $maxNum + 1;
+    do {
+        $cand = 'PROV-' . str_pad((string) $next, 4, '0', STR_PAD_LEFT);
+        $next++;
+    } while (isset($used[$cand]));
+
+    return $cand;
+}
+
+/**
  * Verify credentials against the database `accounts` table.
- * Matches by User ID (e.g. A-0001, D-1001, S-1001, P-1001) and/or Username, Email, or Full Name,
- * then verifies the password hash.
+ * One login page for all roles: supports Mobile Number or Email (or User ID / MRN) + Password.
  */
 function db_verify_login(string $userId, string $identifier, string $password): array
 {
@@ -850,8 +965,10 @@ function db_verify_login(string $userId, string $identifier, string $password): 
             return true;
         }
 
-        if (preg_match('/^([ASDPC])-?0*(\d+)$/i', $clean, $m) && preg_match('/^([ASDPC])-?0*(\d+)$/i', $accId, $am)) {
-            if (strtoupper($m[1]) === strtoupper($am[1]) && (int)$m[2] === (int)$am[2]) {
+        if (preg_match('/^(MRN|[ASDPC])-?0*(\d+)$/i', $clean, $m) && preg_match('/^(MRN|[ASDPC])-?0*(\d+)$/i', $accId, $am)) {
+            $p1 = strtoupper($m[1]) === 'MRN' ? 'P' : strtoupper($m[1]);
+            $p2 = strtoupper($am[1]) === 'MRN' ? 'P' : strtoupper($am[1]);
+            if ($p1 === $p2 && (int)$m[2] === (int)$am[2]) {
                 return true;
             }
         }
@@ -881,7 +998,7 @@ function db_verify_login(string $userId, string $identifier, string $password): 
                 }
             }
             if ($acc['role'] === 'Patient') {
-                $pStmt = $pdo->prepare('SELECT phone FROM patients WHERE UPPER(patient_id) = :pid LIMIT 1');
+                $pStmt = $pdo->prepare('SELECT phone FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
                 $pStmt->execute([':pid' => $acc['user_id']]);
                 if ($pRow = $pStmt->fetch(PDO::FETCH_ASSOC)) {
                     $ptPhone = preg_replace('/[^0-9]/', '', (string)($pRow['phone'] ?? ''));
@@ -895,41 +1012,20 @@ function db_verify_login(string $userId, string $identifier, string $password): 
         return false;
     };
 
-    $matchedAccounts = [];
-    foreach ($allAccounts as $acc) {
-        if ($matchesInput($acc, $rawUserId)) {
-            $matchedAccounts[] = $acc;
-        }
-    }
-
-    if (empty($matchedAccounts) && $rawIdentifier !== '') {
+    $finalCandidates = [];
+    if ($rawUserId !== '' && $rawIdentifier !== '' && strcasecmp($rawUserId, $rawIdentifier) !== 0) {
         foreach ($allAccounts as $acc) {
-            if ($matchesInput($acc, $rawIdentifier)) {
-                $matchedAccounts[] = $acc;
+            if ($matchesInput($acc, $rawUserId) && ($acc['role'] === 'Admin' || $matchesInput($acc, $rawIdentifier))) {
+                $finalCandidates[] = $acc;
             }
         }
     }
-
-    if (empty($matchedAccounts)) {
-        if (!preg_match('/^[ASDPC]/i', $rawUserId) && strcasecmp($rawUserId, 'admin') !== 0) {
-            return ['error' => 'invalid_id'];
-        }
-        return ['error' => 'wrong'];
-    }
-
-    $finalCandidates = [];
-    foreach ($matchedAccounts as $acc) {
-        if ($acc['role'] === 'Admin') {
-            $finalCandidates[] = $acc;
-            continue;
-        }
-
-        if ($rawIdentifier === '') {
-            continue;
-        }
-
-        if ($matchesInput($acc, $rawIdentifier)) {
-            $finalCandidates[] = $acc;
+    if (empty($finalCandidates)) {
+        $lookup = $rawIdentifier !== '' ? $rawIdentifier : $rawUserId;
+        foreach ($allAccounts as $acc) {
+            if ($matchesInput($acc, $lookup)) {
+                $finalCandidates[] = $acc;
+            }
         }
     }
 
@@ -1361,14 +1457,16 @@ function db_load_state(): array
 {
     $pdo = db();
 
-    // 1. Users (non-Admin staff/doctors/patients from `accounts`)
+    // 1. Users (all staff/doctors/cashiers/admins/patients from `accounts`)
     $users   = [];
     $seenIds = [];
-    $stmt    = $pdo->query("SELECT * FROM accounts WHERE role != 'Admin' ORDER BY id ASC");
+    $stmt    = $pdo->query("SELECT * FROM accounts ORDER BY id ASC");
     $rawUsers = $stmt->fetchAll();
     foreach ($rawUsers as &$u) {
         $rl = (string) ($u['user_role_label'] ?? '');
-        if ($rl === '' || strcasecmp($rl, 'Front desk') === 0 || strcasecmp($rl, 'Staff') === 0) {
+        if ($u['role'] === 'Admin' || $rl === 'Admin' || $rl === 'Administrator') {
+            $rl = 'Admin';
+        } elseif ($rl === '' || strcasecmp($rl, 'Front desk') === 0 || strcasecmp($rl, 'Staff') === 0) {
             $rl = $u['role'] === 'Doctor' ? 'Doctor' : ($u['role'] === 'Cashier' ? 'Cashier' : ($u['role'] === 'Patient' ? 'Patient' : 'Staff'));
         }
         $expPrefix = db_prefix_for_role($rl);
@@ -1399,16 +1497,19 @@ function db_load_state(): array
             $u['username'],
             $u['license_number'],
             $u['birthdate'] ?? '',
-            'phone'          => $u['phone'] ?? '',
-            'phone_verified' => (int) ($u['phone_verified'] ?? 0),
-            'address'        => $u['address'] ?? '',
-            'country'        => $u['country'] ?? 'Philippines',
-            'province'       => $u['province'] ?? '',
-            'city'           => $u['city'] ?? '',
-            'barangay'       => $u['barangay'] ?? '',
-            'street'         => $u['street'] ?? '',
-            'postal_code'    => $u['postal_code'] ?? '',
-            'sex'            => $u['sex'] ?? 'Not specified',
+            'phone'                  => $u['phone'] ?? '',
+            'phone_verified'         => (int) ($u['phone_verified'] ?? 0),
+            'address'                => $u['address'] ?? '',
+            'country'                => $u['country'] ?? 'Philippines',
+            'province'               => $u['province'] ?? '',
+            'city'                   => $u['city'] ?? '',
+            'barangay'               => $u['barangay'] ?? '',
+            'street'                 => $u['street'] ?? '',
+            'postal_code'            => $u['postal_code'] ?? '',
+            'sex'                    => $u['sex'] ?? 'Not specified',
+            'force_password_change'  => (int) ($u['force_password_change'] ?? 0),
+            'set_password_token'     => (string) ($u['set_password_token'] ?? ''),
+            'set_password_expires_at'=> (int) ($u['set_password_expires_at'] ?? 0),
         ];
     }
 
@@ -1416,6 +1517,58 @@ function db_load_state(): array
     $patients = [];
     $stmt     = $pdo->query('SELECT * FROM patients ORDER BY id DESC');
     foreach ($stmt->fetchAll() as $p) {
+        $pid       = (string) ($p['patient_id'] ?? '');
+        $regStatus = (string) ($p['registration_status'] ?? '');
+        if ($regStatus === '') {
+            $regStatus = str_starts_with(strtoupper($pid), 'PROV-') ? 'Provisional' : 'Registered';
+        }
+
+        // Rule: Provisional accounts are only allowed until 30 days. After 30 days, auto-archive.
+        $createdAt  = (string) ($p['created_at'] ?? '');
+        $cTs        = strtotime($createdAt) ?: 0;
+        $daysOld    = $cTs > 0 ? (time() - $cTs) / 86400 : 0;
+        $isArchived = ($p['status'] ?? '') === 'Archived';
+
+        if ($regStatus === 'Provisional' && ($daysOld >= 30 || $isArchived)) {
+            $arcCode = 'ARC-PROV-' . preg_replace('/[^0-9A-Z]/', '', strtoupper($pid));
+            $chk = $pdo->prepare('SELECT id FROM archive_records WHERE archive_code = :ac LIMIT 1');
+            $chk->execute([':ac' => $arcCode]);
+            if (!$chk->fetchColumn()) {
+                db_archive_record(
+                    $p['full_name'] . ' (' . $pid . ')',
+                    'Provisional Patient',
+                    'System (30-Day Auto Archive)',
+                    $p
+                );
+            }
+            if (!$isArchived) {
+                $pdo->prepare('UPDATE patients SET status = "Archived" WHERE id = :id')->execute([':id' => $p['id']]);
+            }
+            // Exclude expired provisional accounts from all active UIs
+            continue;
+        }
+
+        if ($isArchived) {
+            continue;
+        }
+
+        $mrn = trim((string) ($p['mrn'] ?? ''));
+        if ($regStatus === 'Provisional') {
+            $mrn = '';
+        } elseif ($mrn === '') {
+            $mrn = str_starts_with(strtoupper($pid), 'PROV-') ? db_next_mrn() : $pid;
+        }
+
+        $nameParts = explode(' ', trim((string) ($p['full_name'] ?? '')), 3);
+        $fName     = (string) ($p['first_name'] ?? '');
+        $mName     = (string) ($p['middle_name'] ?? '');
+        $lName     = (string) ($p['last_name'] ?? '');
+        if ($fName === '' && $lName === '') {
+            $fName = $nameParts[0] ?? '';
+            $lName = count($nameParts) === 3 ? $nameParts[2] : ($nameParts[1] ?? '');
+            $mName = count($nameParts) === 3 ? $nameParts[1] : '';
+        }
+
         $patients[] = [
             $p['full_name'],
             $p['birthdate'],
@@ -1425,16 +1578,27 @@ function db_load_state(): array
             $p['sex'],
             $p['blood_type'],
             $p['address'],
-            $p['patient_id'],
-            'country'        => $p['country'] ?? 'Philippines',
-            'province'       => $p['province'] ?? '',
-            'city'           => $p['city'] ?? '',
-            'barangay'       => $p['barangay'] ?? '',
-            'street'         => $p['street'] ?? '',
-            'postal_code'    => $p['postal_code'] ?? '',
-            'phone_verified' => (int) ($p['phone_verified'] ?? 0),
-            'status'         => $p['status'] ?? 'Active',
-            'email'          => $p['email'] ?? '',
+            $pid,
+            'mrn'                 => $mrn,
+            'registration_status' => $regStatus,
+            'first_name'          => $fName,
+            'middle_name'         => $mName,
+            'last_name'           => $lName,
+            'country'             => $p['country'] ?? 'Philippines',
+            'province'            => $p['province'] ?? '',
+            'city'                => $p['city'] ?? '',
+            'barangay'            => $p['barangay'] ?? '',
+            'street'              => $p['street'] ?? '',
+            'postal_code'         => $p['postal_code'] ?? '',
+            'phone_verified'      => (int) ($p['phone_verified'] ?? 0),
+            'id_checked'          => (int) ($p['id_checked'] ?? 0),
+            'consent_given'       => (int) ($p['consent_given'] ?? 0),
+            'status'              => $p['status'] ?? 'Active',
+            'email'               => $p['email'] ?? '',
+            'created_by'          => $p['created_by'] ?? 'Staff',
+            'created_at'          => $p['created_at'] ?? date('Y-m-d H:i:s'),
+            'upgraded_by'         => $p['upgraded_by'] ?? '',
+            'upgraded_at'         => $p['upgraded_at'] ?? '',
         ];
     }
 
@@ -1444,8 +1608,13 @@ function db_load_state(): array
             $uBdate = trim((string) ($u[10] ?? ''));
             $foundPt = false;
             foreach ($patients as &$pt) {
-                if (strcasecmp((string) ($pt[8] ?? ''), (string) $u[7]) === 0 || strcasecmp((string) $pt[0], (string) $u[0]) === 0) {
+                if (strcasecmp((string) ($pt[8] ?? ''), (string) $u[7]) === 0
+                    || strcasecmp((string) ($pt['mrn'] ?? ''), (string) $u[7]) === 0
+                    || strcasecmp((string) $pt[0], (string) $u[0]) === 0) {
                     $pt[8] = $u[7];
+                    if (empty($pt['mrn']) && ($pt['registration_status'] ?? 'Registered') === 'Registered') {
+                        $pt['mrn'] = $u[7];
+                    }
                     if ($uBdate !== '' && ($pt[1] === '' || $pt[1] === '—')) {
                         $pt[1] = $uBdate;
                     }
@@ -1458,26 +1627,97 @@ function db_load_state(): array
                 array_unshift($patients, [
                     $u[0],
                     $uBdate !== '' ? $uBdate : '—',
+                    $u['phone'] ?: '—',
                     '—',
-                    'HIN-' . rand(100, 999) . '-' . rand(100, 999),
                     function_exists('initials') ? initials((string) $u[0], 2) : 'PT',
+                    $u['sex'] ?? 'Not specified',
                     'Not specified',
-                    'Not specified',
-                    '—',
+                    $u['address'] ?: '—',
                     $u[7],
+                    'mrn'                 => $u[7],
+                    'registration_status' => 'Registered',
+                    'phone_verified'      => 1,
+                    'status'              => 'Active',
+                    'email'               => $u[1] ?? '',
+                    'created_by'          => 'Staff',
+                    'created_at'          => date('Y-m-d H:i:s'),
                 ]);
             }
         }
     }
 
-    // 3. CRUD: departments, rooms
+    // 3. CRUD: departments, rooms, beds, price_list, doctor_schedules
     $departments = [];
     foreach ($pdo->query('SELECT * FROM departments ORDER BY id ASC')->fetchAll() as $d) {
         $departments[] = [$d['name'], $d['head_doctor'], $d['staff_count'], $d['location']];
     }
+    if (!$departments) {
+        $departments = seed_departments_list();
+    }
+
+    $beds = db_get_store('beds');
+    if (!is_array($beds) || !$beds) {
+        $beds = seed_beds();
+    } else {
+        $flatBeds = [];
+        foreach ($beds as $bItem) {
+            if (isset($bItem['beds']) && is_array($bItem['beds'])) {
+                $rNum = str_replace('Room ', '', (string) ($bItem['room_number'] ?? ''));
+                foreach ($bItem['beds'] as $sub) {
+                    $flatBeds[] = [
+                        'bed_id'             => $sub['bed_id'] ?? ('RM-' . $rNum . '-A'),
+                        'room_no'            => $rNum,
+                        'bed_code'           => $sub['bed_label'] ?? 'Bed A',
+                        'ward'               => $bItem['ward'] ?? 'General Ward',
+                        'room_type'          => $bItem['room_type'] ?? 'Ward',
+                        'floor'              => $bItem['floor'] ?? '1st Floor',
+                        'rate'               => (float) ($bItem['rate_per_day'] ?? 1500.0),
+                        'status'             => $sub['status'] ?? 'Vacant',
+                        'patient'            => $sub['patient_name'] ?? '',
+                        'mrn'                => $sub['mrn'] ?? '',
+                        'admitted_date'      => $sub['admission_date'] ?? '',
+                        'doctor'             => $sub['doctor_name'] ?? '',
+                        'maintenance_reason' => $sub['maintenance_reason'] ?? '',
+                        'active'             => !empty($bItem['is_active']),
+                    ];
+                }
+            } else {
+                $bItem['room_no']  = $bItem['room_no'] ?? str_replace('Room ', '', (string) ($bItem['room_number'] ?? ''));
+                $bItem['bed_code'] = $bItem['bed_code'] ?? ($bItem['bed_label'] ?? 'Bed A');
+                $bItem['rate']     = (float) ($bItem['rate'] ?? ($bItem['rate_per_day'] ?? 1500.0));
+                $bItem['active']   = !empty($bItem['active']) || !empty($bItem['is_active']);
+                $flatBeds[] = $bItem;
+            }
+        }
+        $beds = $flatBeds;
+    }
+
+    $priceList = db_get_store('price_list');
+    if (!is_array($priceList) || !$priceList) {
+        $priceList = seed_price_list();
+    } else {
+        foreach ($priceList as &$it) {
+            $it['id']     = $it['id'] ?? $it['code'] ?? 'PRC-101';
+            $it['code']   = $it['code'] ?? $it['id'] ?? 'PRC-101';
+            $it['active'] = !empty($it['active']) || ($it['status'] ?? '') === 'Active';
+            $it['status'] = $it['status'] ?? ($it['active'] ? 'Active' : 'Disabled');
+        }
+        unset($it);
+    }
+
+    $doctorSchedules = db_get_store('doctor_schedules');
+    if (!is_array($doctorSchedules)) {
+        $doctorSchedules = seed_doctor_schedules();
+    }
+
     $rooms = [];
     foreach ($pdo->query('SELECT * FROM rooms ORDER BY room_number ASC')->fetchAll() as $r) {
         $rooms[] = [$r['room_number'], $r['ward'], $r['status'], $r['patient_name']];
+    }
+    if (!$rooms) {
+        foreach ($beds as $bRoom) {
+            $rooms[] = [$bRoom['room_number'], $bRoom['ward'], 'Available', '—'];
+        }
     }
 
     // 4. Appointments
@@ -1499,8 +1739,33 @@ function db_load_state(): array
     // 5. Admissions & Discharges
     $admissions = [];
     $admittedRoomMap = [];
-    foreach ($pdo->query('SELECT * FROM admissions ORDER BY id DESC')->fetchAll() as $ad) {
-        $admissions[] = [$ad['patient_name'], $ad['room_number'], $ad['ward'], $ad['admitted_date'], $ad['doctor_name'], $ad['reason']];
+    foreach ($pdo->query('SELECT * FROM admissions ORDER BY id DESC')->fetchAll() as $adIdx => $ad) {
+        $admId = !empty($ad['admission_id']) ? (string) $ad['admission_id'] : ('ADM-' . str_pad((string) (1001 + (int) ($ad['id'] ?? $adIdx)), 4, '0', STR_PAD_LEFT));
+        $admissions[] = [
+            0                   => $ad['patient_name'],
+            1                   => $ad['room_number'],
+            2                   => $ad['ward'],
+            3                   => $ad['admitted_date'],
+            4                   => $ad['doctor_name'],
+            5                   => $ad['reason'],
+            'admission_id'      => $admId,
+            'patient_name'      => $ad['patient_name'],
+            'mrn'               => $ad['mrn'] ?? '',
+            'department'        => $ad['department'] ?? 'Internal Medicine',
+            'room_number'       => $ad['room_number'],
+            'bed_label'         => $ad['bed_label'] ?? 'Bed A',
+            'ward'              => $ad['ward'],
+            'admitted_date'     => $ad['admitted_date'],
+            'doctor_name'       => $ad['doctor_name'],
+            'reason'            => $ad['reason'],
+            'status'            => $ad['status'] ?? 'Admitted',
+            'clinical_notes'    => !empty($ad['clinical_notes_json']) ? (json_decode((string) $ad['clinical_notes_json'], true) ?: []) : [],
+            'discharge_order'   => (string) ($ad['discharge_order'] ?? ''),
+            'final_diagnosis'   => (string) ($ad['final_diagnosis'] ?? ''),
+            'billing_clearance' => (string) ($ad['billing_clearance'] ?? 'Pending'),
+            'clearance_reason'  => (string) ($ad['clearance_reason'] ?? ''),
+            'cleared_by'        => (string) ($ad['cleared_by'] ?? ''),
+        ];
         if (!empty($ad['room_number']) && !empty($ad['patient_name']) && $ad['patient_name'] !== '—') {
             $admittedRoomMap[$ad['room_number']] = $ad['patient_name'];
         }
@@ -1517,9 +1782,30 @@ function db_load_state(): array
         }
     }
     unset($rmRow);
+
     $discharges = [];
-    foreach ($pdo->query('SELECT * FROM discharges ORDER BY id ASC')->fetchAll() as $dc) {
-        $discharges[] = [$dc['patient_name'], $dc['room_number'], $dc['ward'], $dc['discharged_date'], $dc['proof_path'], (int) $dc['discharged_ts']];
+    foreach ($pdo->query('SELECT * FROM discharges ORDER BY id DESC')->fetchAll() as $dc) {
+        $discharges[] = [
+            0                 => $dc['patient_name'],
+            1                 => $dc['room_number'],
+            2                 => $dc['ward'],
+            3                 => $dc['discharged_date'],
+            4                 => $dc['proof_path'],
+            5                 => (int) $dc['discharged_ts'],
+            'patient_name'    => $dc['patient_name'],
+            'mrn'             => $dc['mrn'] ?? '',
+            'room_number'     => $dc['room_number'],
+            'bed_label'       => $dc['bed_label'] ?? 'Bed A',
+            'ward'            => $dc['ward'],
+            'doctor_name'     => $dc['doctor_name'] ?? '',
+            'admitted_date'   => $dc['admitted_date'] ?? '',
+            'discharged_date' => $dc['discharged_date'],
+            'discharge_type'  => $dc['discharge_type'] ?? 'Recovered / Improved',
+            'final_diagnosis' => $dc['final_diagnosis'] ?? '',
+            'length_of_stay'  => max(1, (int) ($dc['length_of_stay'] ?? 1)),
+            'proof_path'      => $dc['proof_path'],
+            'discharged_ts'   => (int) $dc['discharged_ts'],
+        ];
     }
 
     // 6. Bills, Receipts & Payments
@@ -1705,26 +1991,29 @@ function db_load_state(): array
     }
 
     return [
-        '_v'            => 12,
-        'patients'      => $patients,
-        'users'         => $users,
-        'crud'          => [
+        '_v'               => 14,
+        'patients'         => $patients,
+        'users'            => $users,
+        'crud'             => [
             'departments' => $departments,
             'rooms'       => $rooms,
         ],
-        'admissions'    => $admissions,
-        'bills'         => $bills,
-        'payments'      => $payments,
-        'discharges'    => $discharges,
-        'receipts'      => $receipts,
-        'roles'         => $roles,
-        'notifications' => $notifications,
-        'appointments'  => $appointments,
-        'records'       => $records,
-        'prescriptions' => $prescriptions,
-        'lab_results'   => $labResults,
-        'archive'       => $archive,
-        'audit'         => $audit,
+        'beds'             => $beds,
+        'price_list'       => $priceList,
+        'doctor_schedules' => $doctorSchedules,
+        'admissions'       => $admissions,
+        'bills'            => $bills,
+        'payments'         => $payments,
+        'discharges'       => $discharges,
+        'receipts'         => $receipts,
+        'roles'            => $roles,
+        'notifications'    => $notifications,
+        'appointments'     => $appointments,
+        'records'          => $records,
+        'prescriptions'    => $prescriptions,
+        'lab_results'      => $labResults,
+        'archive'          => $archive,
+        'audit'            => $audit,
     ];
 }
 
@@ -1749,14 +2038,22 @@ function db_save_state(array $state): void
 
         // Patients
         $pdo->exec('DELETE FROM patients');
-        $insPt = $pdo->prepare('INSERT INTO patients (patient_id, full_name, birthdate, phone, insurance_no, avatar, sex, blood_type, address, country, province, city, barangay, street, postal_code, phone_verified, status, created_at) VALUES (:pid, :fn, :bd, :ph, :in, :av, :sx, :bt, :ad, :co, :pr, :ci, :bg, :st, :pc, :pv, :stt, :ca)');
+        $insPt = $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, first_name, middle_name, last_name, full_name, birthdate, phone, email, insurance_no, avatar, sex, blood_type, address, country, province, city, barangay, street, postal_code, phone_verified, id_checked, consent_given, status, created_by, created_at, upgraded_by, upgraded_at) VALUES (:pid, :mrn, :reg, :fnm, :mnm, :lnm, :fn, :bd, :ph, :em, :in, :av, :sx, :bt, :ad, :co, :pr, :ci, :bg, :st, :pc, :pv, :idc, :con, :stt, :cb, :ca, :ub, :ua)');
         foreach (array_reverse($state['patients'] ?? []) as $idx => $p) {
-            $pid = $p[8] ?? ('P-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT));
+            $regSt = (string) ($p['registration_status'] ?? 'Registered');
+            $pid   = (string) ($p[8] ?? (($regSt === 'Provisional' ? 'PROV-' : 'MRN-') . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT)));
+            $mrn   = $regSt === 'Provisional' ? '' : (string) ($p['mrn'] ?? $pid);
             $insPt->execute([
                 ':pid' => $pid,
+                ':mrn' => $mrn,
+                ':reg' => $regSt,
+                ':fnm' => $p['first_name'] ?? '',
+                ':mnm' => $p['middle_name'] ?? '',
+                ':lnm' => $p['last_name'] ?? '',
                 ':fn'  => $p[0] ?? '—',
                 ':bd'  => $p[1] ?? '—',
                 ':ph'  => $p[2] ?? '—',
+                ':em'  => $p['email'] ?? '',
                 ':in'  => $p[3] ?? '—',
                 ':av'  => $p[4] ?? 'PT',
                 ':sx'  => $p[5] ?? 'Not specified',
@@ -1769,8 +2066,13 @@ function db_save_state(array $state): void
                 ':st'  => $p['street'] ?? '',
                 ':pc'  => $p['postal_code'] ?? '',
                 ':pv'  => (int) ($p['phone_verified'] ?? 0),
+                ':idc' => (int) ($p['id_checked'] ?? 0),
+                ':con' => (int) ($p['consent_given'] ?? 0),
                 ':stt' => $p['status'] ?? 'Active',
-                ':ca'  => date('Y-m-d H:i:s'),
+                ':cb'  => $p['created_by'] ?? 'Staff',
+                ':ca'  => $p['created_at'] ?? date('Y-m-d H:i:s'),
+                ':ub'  => $p['upgraded_by'] ?? '',
+                ':ua'  => $p['upgraded_at'] ?? '',
             ]);
         }
 
@@ -1808,39 +2110,57 @@ function db_save_state(array $state): void
                 ':tm'  => $a[0] ?? '09:00',
                 ':pt'  => $ptName,
                 ':vt'  => $a[2] ?? 'Consultation',
-                ':st'  => $a[3] ?? 'Confirmed',
+                ':st'  => $a[3] ?? 'Scheduled',
                 ':cp'  => $a[4] ?? '',
                 ':dr'  => $a[5] ?? '—',
-                ':dp'  => $a[6] ?? 'General Medicine',
+                ':dp'  => $a[6] ?? 'Internal Medicine',
                 ':dt'  => $a[7] ?? date('M d, Y'),
             ]);
         }
 
         // Admissions
         $pdo->exec('DELETE FROM admissions');
-        $insAd = $pdo->prepare('INSERT INTO admissions (patient_name, room_number, ward, admitted_date, doctor_name, reason) VALUES (:pt, :rm, :wd, :dt, :dr, :rs)');
-        foreach (array_reverse($state['admissions'] ?? []) as $ad) {
+        $insAd = $pdo->prepare('INSERT INTO admissions (admission_id, patient_name, mrn, department, room_number, bed_label, ward, admitted_date, doctor_name, reason, status, clinical_notes_json, discharge_order, final_diagnosis, billing_clearance, clearance_reason, cleared_by) VALUES (:aid, :pt, :mrn, :dp, :rm, :bd, :wd, :dt, :dr, :rs, :st, :cn, :do, :fd, :bc, :cr, :cb)');
+        foreach (array_reverse($state['admissions'] ?? []) as $adIdx => $ad) {
             $insAd->execute([
-                ':pt' => $ad[0] ?? '—',
-                ':rm' => $ad[1] ?? '—',
-                ':wd' => $ad[2] ?? 'General Ward',
-                ':dt' => $ad[3] ?? date('M d, Y'),
-                ':dr' => $ad[4] ?? 'Unassigned',
-                ':rs' => $ad[5] ?? '',
+                ':aid' => $ad['admission_id'] ?? ('ADM-' . str_pad((string) (1001 + $adIdx), 4, '0', STR_PAD_LEFT)),
+                ':pt'  => $ad['patient_name'] ?? ($ad[0] ?? '—'),
+                ':mrn' => $ad['mrn'] ?? '',
+                ':dp'  => $ad['department'] ?? 'Internal Medicine',
+                ':rm'  => $ad['room_number'] ?? ($ad[1] ?? '—'),
+                ':bd'  => $ad['bed_label'] ?? 'Bed A',
+                ':wd'  => $ad['ward'] ?? ($ad[2] ?? 'General Ward'),
+                ':dt'  => $ad['admitted_date'] ?? ($ad[3] ?? date('M d, Y')),
+                ':dr'  => $ad['doctor_name'] ?? ($ad[4] ?? 'Unassigned'),
+                ':rs'  => $ad['reason'] ?? ($ad[5] ?? ''),
+                ':st'  => $ad['status'] ?? 'Admitted',
+                ':cn'  => json_encode($ad['clinical_notes'] ?? []),
+                ':do'  => $ad['discharge_order'] ?? '',
+                ':fd'  => $ad['final_diagnosis'] ?? '',
+                ':bc'  => $ad['billing_clearance'] ?? 'Pending',
+                ':cr'  => $ad['clearance_reason'] ?? '',
+                ':cb'  => $ad['cleared_by'] ?? '',
             ]);
         }
 
         // Discharges
         $pdo->exec('DELETE FROM discharges');
-        $insDc = $pdo->prepare('INSERT INTO discharges (patient_name, room_number, ward, discharged_date, proof_path, discharged_ts) VALUES (:pt, :rm, :wd, :dt, :pf, :ts)');
+        $insDc = $pdo->prepare('INSERT INTO discharges (patient_name, mrn, room_number, bed_label, ward, doctor_name, admitted_date, discharged_date, discharge_type, final_diagnosis, length_of_stay, proof_path, discharged_ts) VALUES (:pt, :mrn, :rm, :bd, :wd, :dr, :adt, :dt, :dtype, :fd, :los, :pf, :ts)');
         foreach ($state['discharges'] ?? [] as $dc) {
             $insDc->execute([
-                ':pt' => $dc[0] ?? '—',
-                ':rm' => $dc[1] ?? '—',
-                ':wd' => $dc[2] ?? 'General Ward',
-                ':dt' => $dc[3] ?? date('M d, Y'),
-                ':pf' => $dc[4] ?? null,
-                ':ts' => (int) ($dc[5] ?? time()),
+                ':pt'    => $dc['patient_name'] ?? ($dc[0] ?? '—'),
+                ':mrn'   => $dc['mrn'] ?? '',
+                ':rm'    => $dc['room_number'] ?? ($dc[1] ?? '—'),
+                ':bd'    => $dc['bed_label'] ?? 'Bed A',
+                ':wd'    => $dc['ward'] ?? ($dc[2] ?? 'General Ward'),
+                ':dr'    => $dc['doctor_name'] ?? '',
+                ':adt'   => $dc['admitted_date'] ?? '',
+                ':dt'    => $dc['discharged_date'] ?? ($dc[3] ?? date('M d, Y')),
+                ':dtype' => $dc['discharge_type'] ?? 'Recovered / Improved',
+                ':fd'    => $dc['final_diagnosis'] ?? '',
+                ':los'   => max(1, (int) ($dc['length_of_stay'] ?? 1)),
+                ':pf'    => $dc['proof_path'] ?? ($dc[4] ?? null),
+                ':ts'    => (int) ($dc['discharged_ts'] ?? ($dc[5] ?? time())),
             ]);
         }
 
@@ -2029,6 +2349,15 @@ function db_save_state(array $state): void
     }
 
     db_set_store('notifications', $state['notifications'] ?? []);
+    if (isset($state['beds']) && is_array($state['beds'])) {
+        db_set_store('beds', $state['beds']);
+    }
+    if (isset($state['price_list']) && is_array($state['price_list'])) {
+        db_set_store('price_list', $state['price_list']);
+    }
+    if (isset($state['doctor_schedules']) && is_array($state['doctor_schedules'])) {
+        db_set_store('doctor_schedules', $state['doctor_schedules']);
+    }
 }
 
 /**

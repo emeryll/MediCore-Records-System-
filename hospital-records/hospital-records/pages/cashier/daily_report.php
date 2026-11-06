@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 $rawDate = trim((string) ($_GET['date'] ?? date('Y-m-d')));
 $selDate = (preg_match('/^\d{4}-\d{2}-\d{2}$/', $rawDate) && strtotime($rawDate) !== false)
     ? $rawDate
@@ -17,7 +19,7 @@ $dayPayments = array_values(array_filter(
     }
 ));
 
-$methods = ['Cash', 'Card', 'GCash', 'Insurance'];
+$methods = ['Cash', 'Card', 'HMO', 'PhilHealth'];
 $methodTotals = [];
 $methodCounts = [];
 foreach ($methods as $m) {
@@ -28,6 +30,11 @@ foreach ($methods as $m) {
 $grandTotal = 0.0;
 foreach ($dayPayments as $py) {
     $m   = (string) ($py['payment_method'] ?? 'Cash');
+    if ($m === 'GCash') {
+        $m = 'Card';
+    } elseif ($m === 'Insurance') {
+        $m = 'HMO';
+    }
     $amt = parse_money($py['amount_paid'] ?? 0);
     if (!isset($methodTotals[$m])) {
         $methodTotals[$m] = 0.0;
@@ -39,12 +46,12 @@ foreach ($dayPayments as $py) {
 }
 
 $actions = '<div class="button-pair">'
-    . '<button type="button" class="btn btn-primary" onclick="window.print()">' . icon('printer', 17) . '<span>Print Daily Summary</span></button>'
+    . '<button type="button" class="btn btn-primary" onclick="window.print()">' . icon('printer', 17) . '<span>Print End-of-Day Report</span></button>'
     . '</div>';
 ?>
 <?= page_title(
-    'Daily Collection Report',
-    'Collection totals per payment method and printable end-of-day cashier summary for ' . date('F j, Y', strtotime($selDate)) . '.',
+    'End-of-Day Report',
+    'Summary of collections for ' . date('F j, Y', strtotime($selDate)) . ' broken down by payment method (Cash, Card, HMO, PhilHealth).',
     $actions
 ) ?>
 
@@ -59,17 +66,14 @@ $actions = '<div class="button-pair">'
             <input type="date" name="date" value="<?= e($selDate) ?>" max="<?= date('Y-m-d') ?>" onchange="this.form.submit()">
         </span>
         <button type="submit" class="btn btn-secondary"><span>Apply Date</span></button>
-        <?php if ($selDate !== date('Y-m-d')): ?>
-            <a class="btn btn-ghost" href="<?= e(url(['page' => 'daily-report'])) ?>"><span>Today</span></a>
-        <?php endif; ?>
     </form>
 </div>
 
-<div class="stats-grid">
-    <?= stat_card('Cash Collections', format_money($methodTotals['Cash']), $methodCounts['Cash'] . ' ' . ($methodCounts['Cash'] === 1 ? 'payment' : 'payments'), 'card', 'green') ?>
-    <?= stat_card('Card Collections', format_money($methodTotals['Card']), $methodCounts['Card'] . ' ' . ($methodCounts['Card'] === 1 ? 'payment' : 'payments'), 'card', 'navy') ?>
-    <?= stat_card('GCash Collections', format_money($methodTotals['GCash']), $methodCounts['GCash'] . ' ' . ($methodCounts['GCash'] === 1 ? 'payment' : 'payments'), 'card', 'teal') ?>
-    <?= stat_card('Insurance Claims', format_money($methodTotals['Insurance']), $methodCounts['Insurance'] . ' ' . ($methodCounts['Insurance'] === 1 ? 'payment' : 'payments'), 'shield', 'amber') ?>
+<div class="stats-grid four">
+    <?= stat_card('Cash Collections', format_money($methodTotals['Cash']), $methodCounts['Cash'] . ' payment(s)', 'card', 'green') ?>
+    <?= stat_card('Card Collections', format_money($methodTotals['Card']), $methodCounts['Card'] . ' payment(s)', 'card', 'navy') ?>
+    <?= stat_card('HMO Claims', format_money($methodTotals['HMO']), $methodCounts['HMO'] . ' payment(s)', 'shield', 'teal') ?>
+    <?= stat_card('PhilHealth Claims', format_money($methodTotals['PhilHealth']), $methodCounts['PhilHealth'] . ' payment(s)', 'shield', 'amber') ?>
 </div>
 
 <div class="invoice" style="max-width: 100%; margin-top: 8px;">
@@ -77,11 +81,11 @@ $actions = '<div class="button-pair">'
         <div>
             <?= logo() ?>
             <p style="font-size:11px; color:var(--gray-500); margin-top:6px;">
-                Daily Cashier Collection &amp; Remittance Summary
+                <?= e(APP_ADDRESS) ?> · End-of-Day Cashier Collection &amp; Remittance Summary
             </p>
         </div>
         <div style="text-align:right;">
-            <?= badge('DAILY REPORT', 'info') ?>
+            <?= badge('END-OF-DAY REPORT', 'info') ?>
             <div style="margin-top:8px; font-size:16px; font-weight:800; color:var(--navy-900);">
                 <?= e(date('M d, Y', strtotime($selDate))) ?>
             </div>
@@ -165,25 +169,5 @@ $actions = '<div class="button-pair">'
                 <?php endif; ?>
             </tbody>
         </table>
-    </div>
-
-    <div style="margin-top:34px; padding-top:20px; border-top:1px dashed var(--gray-200); display:flex; justify-content:space-between; align-items:end; font-size:11px; color:var(--gray-500);">
-        <div>
-            Generated on <?= e(date('M d, Y · H:i')) ?> · <strong><?= e(APP_NAME) ?> Health Hospital Records System</strong>
-        </div>
-        <div style="display:flex; gap:40px; text-align:center;">
-            <div>
-                <div style="border-top:1px solid var(--gray-400); padding-top:5px; min-width:170px; color:var(--navy-900); font-weight:600;">
-                    <?= e(current_user_name($role)) ?>
-                </div>
-                <span>Prepared by (Cashier)</span>
-            </div>
-            <div>
-                <div style="border-top:1px solid var(--gray-400); padding-top:5px; min-width:170px; color:var(--navy-900); font-weight:600;">
-                    Accounting / Finance
-                </div>
-                <span>Verified &amp; Received by</span>
-            </div>
-        </div>
     </div>
 </div>

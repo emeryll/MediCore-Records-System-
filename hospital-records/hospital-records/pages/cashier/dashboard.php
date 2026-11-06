@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 $todayYmd = date('Y-m-d');
 $allBills = [];
 foreach ($state['bills'] ?? [] as $idx => $b) {
@@ -27,38 +29,51 @@ foreach ($todayPayments as $tp) {
     $todayCollected += parse_money($tp['amount_paid'] ?? 0);
 }
 
+$waitingClearance = array_values(array_filter(
+    $state['admissions'] ?? [],
+    static fn ($a) => !in_array($a[7] ?? 'Pending', ['Cleared', 'Exception'], true)
+));
+
 $recentPayments = array_slice($allPayments, 0, 6);
 
 $actions = '<div class="button-pair">'
-    . button('Unpaid bills', ['variant' => 'secondary', 'icon' => 'card', 'href' => url(['page' => 'unpaid-bills'])])
-    . button('Process payment', ['icon' => 'clipboard', 'href' => url(['page' => 'process-payment'])])
+    . button('Discharge Clearance', ['variant' => 'secondary', 'icon' => 'shield', 'href' => url(['page' => 'discharge-clearance'])])
+    . button('Billing & Invoices', ['variant' => 'secondary', 'icon' => 'card', 'href' => url(['page' => 'unpaid-bills'])])
+    . button('Process Payment', ['icon' => 'clipboard', 'href' => url(['page' => 'process-payment'])])
     . '</div>';
 ?>
 <?= page_title(
-    'Cashier dashboard',
-    date('l, F j, Y') . ' · Daily collections, pending invoices, and recent payment activity.',
+    'Cashier Dashboard',
+    date('l, F j, Y') . ' · West Metro Medical Center daily collections, unpaid bills, and inpatient discharge clearance.',
     $actions
 ) ?>
 
-<div class="stats-grid three">
+<div class="stats-grid four">
     <?= stat_card(
         "Today's total collected",
         format_money($todayCollected),
-        count($todayPayments) . ' ' . (count($todayPayments) === 1 ? 'transaction' : 'transactions') . ' today',
+        count($todayPayments) . ' transaction(s) today',
         'card',
         'green'
     ) ?>
     <?= stat_card(
         'Unpaid bills count',
         (string) count($unpaidBills),
-        format_money($totalUnpaidBalance) . ' total outstanding balance',
+        format_money($totalUnpaidBalance) . ' outstanding balance',
         'clipboard',
         'amber'
     ) ?>
     <?= stat_card(
-        'Payments today',
-        (string) count($todayPayments),
-        count($allPayments) . ' total payments on record',
+        'Awaiting discharge clearance',
+        (string) count($waitingClearance),
+        'Inpatients needing billing clearance',
+        'bed',
+        'navy'
+    ) ?>
+    <?= stat_card(
+        'Total receipts issued',
+        (string) count($allPayments),
+        'Official hospital receipts on record',
         'history',
         'teal'
     ) ?>
@@ -69,7 +84,7 @@ $actions = '<div class="button-pair">'
         <div class="panel-head">
             <div>
                 <h2>Recent payments</h2>
-                <p>Latest official receipts and collections processed at the cashier desk</p>
+                <p>Latest official receipts (Cash, Card, HMO, PhilHealth) processed at the cashier desk</p>
             </div>
             <?= button('View all history', ['variant' => 'ghost', 'href' => url(['page' => 'payment-history'])]) ?>
         </div>
@@ -98,7 +113,7 @@ $actions = '<div class="button-pair">'
                 <div class="empty-state" style="padding:40px 20px;">
                     <?= icon('card', 28) ?>
                     <strong>No payments processed yet</strong>
-                    <p>Select an invoice from Unpaid Bills to collect a payment and issue an official receipt.</p>
+                    <p>Select an invoice from Billing to collect a payment and issue an official receipt.</p>
                 </div>
             <?php endif; ?>
         </div>

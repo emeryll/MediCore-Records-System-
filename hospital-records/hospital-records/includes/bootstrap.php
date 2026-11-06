@@ -1,12 +1,22 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 if (empty($_SESSION['csrf'])) {
     $_SESSION['csrf'] = bin2hex(random_bytes(16));
 }
 
-const APP_NAME = 'MediCore';
+const APP_NAME          = 'West Metro Medical Center';
+const APP_SHORT_NAME    = 'WMMC';
+const HOSPITAL_SUBTITLE = 'Metro Pacific Health · Zamboanga City';
+const HOSPITAL_ADDRESS  = 'Veterans Avenue Extension, Tetuan, Zamboanga City';
+const HOSPITAL_PHONE    = '0968 873 7637 • 0998 978 9694';
+const HOSPITAL_WEBSITE  = 'new.westmetro.com.ph';
+const HOSPITAL_EMAIL    = 'records@westmetromedical.ph';
+
+require_once __DIR__ . '/wmmc_media.php';
 
 /** Escape output. */
 function e(mixed $value): string
@@ -48,7 +58,24 @@ function take_flash(): ?string
     return $m;
 }
 
-/** Initials for avatars: "Dr. James Wilson" -> "DJ" (limit 2) or "ER". */
+/** Store a simulated SMS or Email notification so it displays visibly in the UI for testing. */
+function push_sim_message(string $channel, string $recipient, string $message, string $linkUrl = '', string $linkLabel = ''): void
+{
+    if (!isset($_SESSION['sim_messages']) || !is_array($_SESSION['sim_messages'])) {
+        $_SESSION['sim_messages'] = [];
+    }
+    array_unshift($_SESSION['sim_messages'], [
+        'channel'    => $channel, // 'SMS' or 'Email'
+        'recipient'  => $recipient,
+        'message'    => $message,
+        'link_url'   => $linkUrl,
+        'link_label' => $linkLabel,
+        'time'       => date('h:i A'),
+    ]);
+    $_SESSION['sim_messages'] = array_slice($_SESSION['sim_messages'], 0, 5);
+}
+
+/** Initials for avatars: "Dr. James Wilson" -> "DJ" (limit 2). */
 function initials(string $name, int $limit = 2): string
 {
     $out = '';
@@ -99,7 +126,106 @@ function patient_age_label(?string $bdate, bool $short = false, string $fallback
     return $short ? ($age . ' ' . ($age === 1 ? 'yr' : 'yrs')) : ($age . ' ' . ($age === 1 ? 'year old' : 'years old'));
 }
 
-/** Find a patient record in $state['patients'] by name or patient ID. */
+/** Is a patient record Provisional (has no MRN yet)? */
+function is_provisional_patient(?array $pt): bool
+{
+    if (!$pt) {
+        return false;
+    }
+    $regStatus = (string) ($pt['registration_status'] ?? '');
+    if (strcasecmp($regStatus, 'Provisional') === 0) {
+        return true;
+    }
+    $id  = strtoupper(trim((string) ($pt[8] ?? '')));
+    $mrn = strtoupper(trim((string) ($pt['mrn'] ?? '')));
+    if (str_starts_with($id, 'PROV-') && ($mrn === '' || $mrn === '—')) {
+        return true;
+    }
+    return false;
+}
+
+/** Return the display MRN for a patient, or blank ('') / fallback ('—') if Provisional. */
+function patient_mrn_display(?array $pt, string $provisionalFallback = ''): string
+{
+    if (!$pt || is_provisional_patient($pt)) {
+        return $provisionalFallback;
+    }
+    $mrn = trim((string) ($pt['mrn'] ?? ''));
+    if ($mrn !== '' && $mrn !== '—' && !str_starts_with(strtoupper($mrn), 'PROV-')) {
+        return $mrn;
+    }
+    $id = trim((string) ($pt[8] ?? ''));
+    if ($id !== '' && !str_starts_with(strtoupper($id), 'PROV-')) {
+        return $id;
+    }
+    return $provisionalFallback;
+}
+
+/** Is a provisional record stale (created more than $daysThreshold days ago and still not converted)? */
+function is_stale_provisional(array $pt, int $daysThreshold = 30): bool
+{
+    if (!is_provisional_patient($pt)) {
+        return false;
+    }
+    if (!empty($pt['is_stale'])) {
+        return true;
+    }
+    $createdAt = trim((string) ($pt['created_at'] ?? ''));
+    if ($createdAt === '') {
+        return false;
+    }
+    $ts = strtotime($createdAt);
+    if ($ts === false) {
+        return false;
+    }
+    return ((time() - $ts) / 86400) >= $daysThreshold;
+}
+
+/**
+ * Search for likely duplicate patient records by name + birthdate + phone (Section 9 Rule 1).
+ * Returns array of matching patient rows.
+ */
+function search_duplicate_patients(array $state, string $nameQuery, string $birthdate = '', string $phone = '', string $excludeId = ''): array
+{
+    $matches    = [];
+    $normName   = mb_strtolower(preg_replace('/\s+/', ' ', trim($nameQuery)));
+    $normDob    = $birthdate !== '' ? format_birthdate($birthdate) : '';
+    $normDigits = preg_replace('/[^0-9]/', '', $phone);
+    if (strlen($normDigits) > 10) {
+        $normDigits = substr($normDigits, -10);
+    }
+
+    foreach ($state['patients'] ?? [] as $p) {
+        $pid = (string) ($p[8] ?? '');
+        if ($excludeId !== '' && strcasecmp($pid, $excludeId) === 0) {
+            continue;
+        }
+        $pName   = mb_strtolower(preg_replace('/\s+/', ' ', trim((string) ($p[0] ?? ''))));
+        $pDob    = format_birthdate((string) ($p[1] ?? ''));
+        $pDigits = preg_replace('/[^0-9]/', '', (string) ($p[2] ?? ''));
+        if (strlen($pDigits) > 10) {
+            $pDigits = substr($pDigits, -10);
+        }
+
+        $score = 0;
+        if ($normName !== '' && ($pName === $normName || str_contains($pName, $normName) || str_contains($normName, $pName))) {
+            $score += 2;
+        }
+        if ($normDob !== '' && $normDob !== '—' && $pDob === $normDob) {
+            $score += 2;
+        }
+        if (strlen($normDigits) >= 9 && $pDigits !== '' && substr($pDigits, -9) === substr($normDigits, -9)) {
+            $score += 2;
+        }
+
+        if ($score >= 2) {
+            $matches[] = $p;
+        }
+    }
+    return $matches;
+}
+
+/** Find a patient record in $state['patients'] by name, MRN, or internal patient ID. */
 function find_patient_record(array $state, string $nameOrId): ?array
 {
     $q = trim($nameOrId);
@@ -107,18 +233,22 @@ function find_patient_record(array $state, string $nameOrId): ?array
         return null;
     }
     foreach ($state['patients'] ?? [] as $p) {
-        if (strcasecmp((string) ($p[0] ?? ''), $q) === 0 || strcasecmp((string) ($p[8] ?? ''), $q) === 0) {
+        $pName = (string) ($p[0] ?? '');
+        $pId   = (string) ($p[8] ?? '');
+        $pMrn  = (string) ($p['mrn'] ?? '');
+        if (strcasecmp($pName, $q) === 0
+            || ($pId !== '' && strcasecmp($pId, $q) === 0)
+            || ($pMrn !== '' && strcasecmp($pMrn, $q) === 0)) {
             return $p;
         }
     }
-    // Also check if $q matches a patient user account's name or ID, then resolve their patient record
     foreach ($state['users'] ?? [] as $u) {
         if (strcasecmp((string) ($u[2] ?? ''), 'Patient') === 0
             && (strcasecmp((string) ($u[0] ?? ''), $q) === 0 || strcasecmp((string) ($u[7] ?? ''), $q) === 0)) {
             $uid   = (string) ($u[7] ?? '');
             $uname = (string) ($u[0] ?? '');
             foreach ($state['patients'] ?? [] as $p) {
-                if (($uid !== '' && strcasecmp((string) ($p[8] ?? ''), $uid) === 0)
+                if (($uid !== '' && (strcasecmp((string) ($p[8] ?? ''), $uid) === 0 || strcasecmp((string) ($p['mrn'] ?? ''), $uid) === 0))
                     || ($uname !== '' && strcasecmp((string) ($p[0] ?? ''), $uname) === 0)) {
                     return $p;
                 }
@@ -129,8 +259,8 @@ function find_patient_record(array $state, string $nameOrId): ?array
 }
 
 /**
- * Resolve all known names and the canonical P-xxxx ID for a patient (by name, ID, or current Patient session).
- * Returns ['id' => 'P-xxxx', 'name' => 'Full Name', 'names' => ['full name', ...], 'record' => ?array].
+ * Resolve all known names and the canonical ID/MRN for a patient.
+ * Returns ['id' => 'MRN-xxxx'|'PROV-xxxx', 'mrn' => 'MRN-xxxx'|'', 'is_provisional' => bool, 'name' => 'Full Name', 'names' => [...], 'record' => ?array].
  */
 function resolve_patient_identity(array $state, ?string $nameOrId = null, ?string $explicitPtId = null): array
 {
@@ -147,7 +277,7 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
     if ($queryId === '' && $sessionUid !== '' && ($nameOrId === null || strcasecmp($queryName, $sessionName) === 0)) {
         $queryId = strtoupper($sessionUid);
     }
-    if ($queryId === '' && preg_match('/^P-\d+$/i', $queryName)) {
+    if ($queryId === '' && preg_match('/^(MRN|PROV|P)-\d+$/i', $queryName)) {
         $queryId = strtoupper($queryName);
     }
 
@@ -160,14 +290,15 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
         }
     };
 
-    if ($queryName !== '' && !preg_match('/^P-\d+$/i', $queryName)) {
+    if ($queryName !== '' && !preg_match('/^(MRN|PROV|P)-\d+$/i', $queryName)) {
         $addName($queryName);
     }
 
     foreach ($state['patients'] ?? [] as $p) {
         $pName = trim((string) ($p[0] ?? ''));
         $pId   = strtoupper(trim((string) ($p[8] ?? '')));
-        if (($queryId !== '' && $pId !== '' && strcasecmp($pId, $queryId) === 0)
+        $pMrn  = strtoupper(trim((string) ($p['mrn'] ?? '')));
+        if (($queryId !== '' && (($pId !== '' && strcasecmp($pId, $queryId) === 0) || ($pMrn !== '' && strcasecmp($pMrn, $queryId) === 0)))
             || ($pName !== '' && isset($names[mb_strtolower($pName)]))) {
             $ptRec ??= $p;
             if ($queryId === '' && $pId !== '') {
@@ -192,10 +323,9 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
         }
     }
 
-    // Second pass over $state['patients'] in case user account matched a patient ID
     if ($ptRec === null && $queryId !== '') {
         foreach ($state['patients'] ?? [] as $p) {
-            if (strcasecmp((string) ($p[8] ?? ''), $queryId) === 0) {
+            if (strcasecmp((string) ($p[8] ?? ''), $queryId) === 0 || strcasecmp((string) ($p['mrn'] ?? ''), $queryId) === 0) {
                 $ptRec = $p;
                 $addName((string) ($p[0] ?? ''));
                 break;
@@ -204,13 +334,17 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
     }
 
     $canonicalName = $ptRec[0] ?? (reset($names) ?: ($queryName !== '' ? $queryName : 'Patient'));
-    $canonicalId   = $queryId !== '' ? $queryId : (string) ($ptRec[8] ?? 'P-1001');
+    $canonicalId   = $queryId !== '' ? $queryId : (string) ($ptRec[8] ?? 'MRN-1001');
+    $isProv        = is_provisional_patient($ptRec);
+    $mrn           = $isProv ? '' : patient_mrn_display($ptRec, $canonicalId);
 
     return [
-        'id'     => $canonicalId,
-        'name'   => (string) $canonicalName,
-        'names'  => array_keys($names),
-        'record' => $ptRec,
+        'id'             => $canonicalId,
+        'mrn'            => $mrn,
+        'is_provisional' => $isProv,
+        'name'           => (string) $canonicalName,
+        'names'          => array_keys($names),
+        'record'         => $ptRec,
     ];
 }
 
@@ -218,8 +352,13 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
 function matches_patient_identity(array $identity, ?string $recPatientName, ?string $recPatientId = null): bool
 {
     $rId = strtoupper(trim((string) ($recPatientId ?? '')));
-    if ($rId !== '' && $rId !== '—' && !empty($identity['id']) && strcasecmp($rId, (string) $identity['id']) === 0) {
-        return true;
+    if ($rId !== '' && $rId !== '—') {
+        if (!empty($identity['id']) && strcasecmp($rId, (string) $identity['id']) === 0) {
+            return true;
+        }
+        if (!empty($identity['mrn']) && strcasecmp($rId, (string) $identity['mrn']) === 0) {
+            return true;
+        }
     }
     $rName = mb_strtolower(trim((string) ($recPatientName ?? '')));
     if ($rName !== '' && in_array($rName, $identity['names'] ?? [], true)) {
@@ -228,7 +367,7 @@ function matches_patient_identity(array $identity, ?string $recPatientName, ?str
     return false;
 }
 
-/** Get all medical records written by doctors for a patient (matched by ID and/or name, sorted newest first). */
+/** Get all medical records written by doctors for a patient. */
 function patient_medical_records(array $state, ?string $nameOrId = null, ?string $ptId = null): array
 {
     $idInfo = resolve_patient_identity($state, $nameOrId, $ptId);
@@ -254,7 +393,7 @@ function patient_medical_records(array $state, ?string $nameOrId = null, ?string
     return $out;
 }
 
-/** Get all prescriptions written by doctors for a patient (from both medical_records and $state['prescriptions']). */
+/** Get all prescriptions written by doctors for a patient. */
 function patient_prescriptions(array $state, ?string $nameOrId = null, ?string $ptId = null): array
 {
     $idInfo  = resolve_patient_identity($state, $nameOrId, $ptId);
@@ -266,7 +405,7 @@ function patient_prescriptions(array $state, ?string $nameOrId = null, ?string $
         $med      = trim((string) ($raw['med'] ?? ($raw['medication'] ?? ($raw[0] ?? ''))));
         $dosage   = trim((string) ($raw['dosage'] ?? ($raw[1] ?? 'As directed')));
         $freq     = trim((string) ($raw['frequency'] ?? ($raw[2] ?? 'Once daily')));
-        $duration = trim((string) ($raw['duration'] ?? ($raw[3] ?? '30 days')));
+        $duration = trim((string) ($raw['duration'] ?? ($raw[3] ?? '7 days')));
         $doc      = trim((string) ($raw['doctor'] ?? ($raw['doctor_name'] ?? $defaultDoc)));
         $date     = trim((string) ($raw['date'] ?? ($raw['prescribed_date'] ?? ($defaultDate ?: date('M d, Y')))));
         $recCode  = trim((string) ($raw['record_code'] ?? $defaultRecCode));
@@ -278,7 +417,7 @@ function patient_prescriptions(array $state, ?string $nameOrId = null, ?string $
             'medication'      => $med,
             'dosage'          => $dosage !== '' ? $dosage : 'As directed',
             'frequency'       => $freq !== '' ? $freq : 'Once daily',
-            'duration'        => $duration !== '' ? $duration : '30 days',
+            'duration'        => $duration !== '' ? $duration : '7 days',
             'doctor'          => $doc !== '' ? $doc : 'Attending Physician',
             'doctor_name'     => $doc !== '' ? $doc : 'Attending Physician',
             'date'            => $date,
@@ -339,7 +478,7 @@ function patient_lab_results(array $state, ?string $nameOrId = null, ?string $pt
     return $out;
 }
 
-/** Parse currency string (e.g. "$1,450.00") or number into float. */
+/** Parse currency string (e.g. "₱1,450.00" or "$1,450.00") or number into float. */
 function parse_money(mixed $val): float
 {
     if (is_int($val) || is_float($val)) {
@@ -349,10 +488,29 @@ function parse_money(mixed $val): float
     return round((float) ($clean !== '' ? $clean : 0), 2);
 }
 
-/** Format float into "$1,450.00". */
+/** Format float into Philippine Peso "₱1,450.00". */
 function format_money(float|int|string $val): string
 {
-    return '$' . number_format(parse_money($val), 2);
+    return '₱' . number_format(parse_money($val), 2);
+}
+
+/** Look up a price from the hospital Price List ($state['price_list']). */
+function price_list_lookup(array $state, string $itemName, string $category = '', float $fallback = 650.00): float
+{
+    $q = mb_strtolower(trim($itemName));
+    foreach ($state['price_list'] ?? [] as $item) {
+        if (($item['status'] ?? 'Active') !== 'Active') {
+            continue;
+        }
+        $iName = mb_strtolower(trim((string) ($item['name'] ?? '')));
+        $iCat  = mb_strtolower(trim((string) ($item['category'] ?? '')));
+        if ($iName === $q || ($q !== '' && (str_contains($iName, $q) || str_contains($q, $iName)))) {
+            if ($category === '' || $iCat === mb_strtolower($category)) {
+                return parse_money($item['price'] ?? $fallback);
+            }
+        }
+    }
+    return $fallback;
 }
 
 /** Generate default itemized charges summing to $total when a bill does not yet have custom line items. */
@@ -360,20 +518,7 @@ function default_bill_items(float $total): array
 {
     $total = max(0.0, round($total, 2));
     if ($total <= 0) {
-        return [['Medical consultation & hospital services', 1, '$0.00', '$0.00']];
-    }
-    if (abs($total - 185.00) < 0.01) {
-        return [
-            ['Specialist consultation & clinical evaluation', 1, '$125.00', '$125.00'],
-            ['Complete blood count (CBC) & lab panel', 1, '$60.00', '$60.00'],
-        ];
-    }
-    if (abs($total - 1450.00) < 0.01) {
-        return [
-            ['Inpatient room & nursing care (per day)', 2, '$450.00', '$900.00'],
-            ['Attending physician & ward rounds', 1, '$320.00', '$320.00'],
-            ['Diagnostic laboratory & imaging panel', 1, '$230.00', '$230.00'],
-        ];
+        return [['Medical consultation & hospital services', 1, '₱0.00', '₱0.00']];
     }
     $consult = round($total * 0.65, 2);
     $lab     = round($total - $consult, 2);
@@ -381,19 +526,19 @@ function default_bill_items(float $total): array
         return [['Outpatient consultation & clinical services', 1, format_money($total), format_money($total)]];
     }
     return [
-        ['Outpatient consultation & physician fee', 1, format_money($consult), format_money($consult)],
-        ['Laboratory & diagnostic services', 1, format_money($lab), format_money($lab)],
+        ['Outpatient specialist consultation fee', 1, format_money($consult), format_money($consult)],
+        ['Clinical laboratory & diagnostic panel', 1, format_money($lab), format_money($lab)],
     ];
 }
 
-/** Normalize a bill row into a consistent 7-element array + associative info. */
+/** Normalize a bill row into a consistent array + associative info. */
 function normalize_bill_row(array $b, int $idx = 0): array
 {
-    $patient   = (string) ($b[0] ?? 'Patient');
-    $total     = parse_money($b[1] ?? 0);
-    $rawStatus = (string) ($b[2] ?? 'Unpaid');
-    $issued    = (string) ($b[3] ?? date('M d, Y'));
-    $billNo    = !empty($b[4]) ? (string) $b[4] : ('BILL-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT));
+    $patient   = (string) ($b[0] ?? ($b['patient'] ?? 'Patient'));
+    $total     = parse_money($b[1] ?? ($b['total'] ?? 0));
+    $rawStatus = (string) ($b[2] ?? ($b['status'] ?? 'Unpaid'));
+    $issued    = (string) ($b[3] ?? ($b['issued'] ?? date('M d, Y')));
+    $billNo    = !empty($b[4]) ? (string) $b[4] : (!empty($b['bill_no']) ? (string) $b['bill_no'] : ('BILL-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT)));
     $paid      = isset($b[5]) && $b[5] !== '' ? parse_money($b[5]) : ($rawStatus === 'Paid' ? $total : 0.0);
     $paid      = min($total, max(0.0, $paid));
     $balance   = max(0.0, round($total - $paid, 2));
@@ -409,7 +554,8 @@ function normalize_bill_row(array $b, int $idx = 0): array
         $paid   = 0.0;
     }
 
-    $items = (!empty($b[6]) && is_array($b[6])) ? $b[6] : default_bill_items($total);
+    $items = (!empty($b[6]) && is_array($b[6])) ? $b[6] : ((!empty($b['items']) && is_array($b['items'])) ? $b['items'] : default_bill_items($total));
+    $mrn   = (string) ($b['mrn'] ?? ($b[7] ?? ''));
 
     return [
         0          => $patient,
@@ -419,7 +565,9 @@ function normalize_bill_row(array $b, int $idx = 0): array
         4          => $billNo,
         5          => $paid,
         6          => $items,
+        7          => $mrn,
         'patient'  => $patient,
+        'mrn'      => $mrn,
         'total'    => $total,
         'paid'     => $paid,
         'balance'  => $balance,
@@ -462,25 +610,35 @@ function &state(): array
         $_SESSION['state'] = db_load_state();
         $loaded = true;
     }
-    if (($_SESSION['state']['_v'] ?? 0) < 12) {
-        $_SESSION['state'] = ['_v' => 12];
+    if (($_SESSION['state']['_v'] ?? 0) < 14) {
+        $_SESSION['state']['_v'] = 14;
+    }
+    // Rule: Provisional accounts are only allowed until 30 days, after 30 days they are archived.
+    if (!empty($_SESSION['state']['patients'])) {
+        $_SESSION['state']['patients'] = array_values(array_filter(
+            $_SESSION['state']['patients'],
+            static fn($p) => !is_stale_provisional($p, 30) && (($p['status'] ?? '') !== 'Archived')
+        ));
     }
     $_SESSION['state'] += [
-        'patients'      => patients_data(),
-        'users'         => seed_users(),
-        'crud'          => seed_crud(),
-        'admissions'    => seed_admissions(),
-        'bills'         => bills_data(),
-        'payments'      => [],
-        'discharges'    => seed_discharges(),
-        'receipts'      => [],
-        'roles'         => seed_roles(),
-        'notifications' => seed_notifications(),
-        'appointments'  => seed_appointments(),   // doctor & staff appointment list (mutable)
-        'records'       => seed_medical_records(), // patient => visit records[]
-        'lab_results'   => seed_lab_results(),     // flat array of lab test rows
-        'archive'       => archive_records(),
-        'audit'         => audit_rows(),
+        'patients'         => patients_data(),
+        'users'            => seed_users(),
+        'crud'             => seed_crud(),
+        'beds'             => seed_beds(),
+        'price_list'       => seed_price_list(),
+        'doctor_schedules' => seed_doctor_schedules(),
+        'admissions'       => seed_admissions(),
+        'bills'            => bills_data(),
+        'payments'         => [],
+        'discharges'       => seed_discharges(),
+        'receipts'         => [],
+        'roles'            => seed_roles(),
+        'notifications'    => seed_notifications(),
+        'appointments'     => seed_appointments(),
+        'records'          => seed_medical_records(),
+        'lab_results'      => seed_lab_results(),
+        'archive'          => archive_records(),
+        'audit'            => audit_rows(),
     ];
     return $_SESSION['state'];
 }

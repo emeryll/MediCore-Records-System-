@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 [$from, $to] = range_params();
 $q        = trim((string) ($_GET['q'] ?? ''));
 $method_  = (string) ($_GET['method'] ?? 'All methods');
@@ -12,10 +14,6 @@ foreach ($allPayments as $py) {
     if ($cName !== '' && !in_array($cName, $cashierOpts, true)) {
         $cashierOpts[] = $cName;
     }
-}
-$curCashier = current_user_name($role);
-if ($curCashier !== '' && !in_array($curCashier, $cashierOpts, true)) {
-    $cashierOpts[] = $curCashier;
 }
 
 $rows = array_values(array_filter(
@@ -32,63 +30,25 @@ $rows = array_values(array_filter(
             $p['cashier_name'] ?? '',
         ], $q)
 ));
-
-$filteredTotal = 0.0;
-foreach ($rows as $r) {
-    $filteredTotal += parse_money($r['amount_paid'] ?? 0);
-}
-
-if (isset($_GET['export'])) {
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename=hospital_payments_' . date('Ymd_His') . '.csv');
-    $out = fopen('php://output', 'w');
-    fputcsv($out, ['Receipt No.', 'Bill No.', 'Patient Name', 'Amount Paid', 'Amount Received', 'Change Due', 'Payment Method', 'Reference No.', 'Cashier', 'Date & Time']);
-    foreach ($rows as $py) {
-        fputcsv($out, [
-            $py['receipt_no'] ?? '',
-            $py['bill_no'] ?? '',
-            $py['patient_name'] ?? '',
-            number_format(parse_money($py['amount_paid'] ?? 0), 2, '.', ''),
-            number_format(parse_money($py['amount_received'] ?? 0), 2, '.', ''),
-            number_format(parse_money($py['change_due'] ?? 0), 2, '.', ''),
-            $py['payment_method'] ?? 'Cash',
-            $py['reference_no'] ?? '—',
-            $py['cashier_name'] ?? '',
-            $py['paid_at'] ?? ($py['paid_date'] ?? ''),
-        ]);
-    }
-    fclose($out);
-    exit;
-}
+$paged = paginate_rows($rows, 10, 'p');
 
 $toolbar = toolbar_open('payment-history')
     . search_box('Search receipt, bill, patient, or ref no...', 'q', $q)
     . '<div class="toolbar-right">'
     . date_range_fields($from, $to)
-    . select_field('', 'method', ['All methods', 'Cash', 'Card', 'GCash', 'Insurance'], $method_)
+    . select_field('', 'method', ['All methods', 'Cash', 'Card', 'HMO', 'PhilHealth'], $method_)
     . select_field('', 'cashier', $cashierOpts, $cashier_)
     . filter_button()
     . '</div>'
     . toolbar_close();
-
-$exportUrl = url([
-    'page'    => 'payment-history',
-    'export'  => 1,
-    'q'       => $q !== '' ? $q : null,
-    'from'    => $from !== '' ? $from : null,
-    'to'      => $to !== '' ? $to : null,
-    'method'  => $method_ !== 'All methods' ? $method_ : null,
-    'cashier' => $cashier_ !== 'All cashiers' ? $cashier_ : null,
-]);
 ?>
 <?= page_title(
-    'Payment History',
-    'Complete log of processed payments with date range, payment method, and cashier filters.',
-    button('Export CSV', ['variant' => 'secondary', 'icon' => 'clipboard', 'href' => $exportUrl])
+    'Payments & Official Receipts',
+    'Complete log of processed payments by Cash, Card, HMO, and PhilHealth.'
 ) ?>
 
 <?= table_open(['Receipt No.', 'Bill No.', 'Patient', 'Amount Paid', 'Method', 'Reference No.', 'Cashier', 'Date & Time', 'Actions'], $toolbar) ?>
-<?php foreach ($rows as $py): ?>
+<?php foreach ($paged['rows'] as $py): ?>
     <tr>
         <td><code><?= e($py['receipt_no'] ?? 'OR-1001') ?></code></td>
         <td><code><?= e($py['bill_no'] ?? 'BILL-1001') ?></code></td>
@@ -115,8 +75,8 @@ $exportUrl = url([
         </td>
     </tr>
 <?php endforeach; ?>
-<?= table_close(count($rows) . ' of ' . count($allPayments) . ' payments · Total collected: ' . format_money($filteredTotal), false) ?>
+<?= table_close('payment', true, $paged['total'], $paged['page'], $paged['pages']) ?>
 
-<?php if (!$rows): ?>
+<?php if (!$paged['rows']): ?>
     <?= filtered_empty('No payment records match the selected filters.') ?>
 <?php endif; ?>

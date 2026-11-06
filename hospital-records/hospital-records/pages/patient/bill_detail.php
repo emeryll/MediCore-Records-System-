@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 $idInfo  = resolve_patient_identity($state);
 $ptName  = $idInfo['name'];
 $billIdx = isset($_GET['bill']) ? (int) $_GET['bill'] : 0;
@@ -39,7 +41,7 @@ $actions = '<div class="button-pair">'
     <div class="invoice-parties">
         <?php
         $billPtRec = find_patient_record($state, $ptName);
-        $billPtId  = $billPtRec[8] ?? ($_SESSION['user_id'] ?? 'P-1001');
+        $billMrn   = $billPtRec ? patient_mrn_display($billPtRec) : ($billPtRec[8] ?? ($_SESSION['user_id'] ?? 'MRN-1001'));
         $billPtDob = format_birthdate($billPtRec[1] ?? '');
         $billPtAge = patient_age_label($billPtDob, true, '—');
         $billPtHin = $billPtRec[3] ?? '—';
@@ -47,12 +49,12 @@ $actions = '<div class="button-pair">'
         <div>
             <span>Billed to</span>
             <strong><?= e($ptName) ?></strong>
-            <p>Patient ID <?= e($billPtId) ?> · Birthday: <?= e($billPtDob) ?> (<?= e($billPtAge) ?>)<br>Insurance <?= e($billPtHin) ?></p>
+            <p>MRN <?= e($billMrn ?: '—') ?> · Birthday: <?= e($billPtDob) ?> (<?= e($billPtAge) ?>)<br>PhilHealth / HMO: <?= e($billPtHin) ?></p>
         </div>
         <div>
             <span>Facility</span>
-            <strong>MediCore Health</strong>
-            <p>1450 Harbor Avenue<br>San Francisco, CA 94107</p>
+            <strong><?= e(APP_FACILITY) ?></strong>
+            <p><?= e(APP_ADDRESS) ?><br>Tel: <?= e(APP_PHONE) ?></p>
         </div>
     </div>
 
@@ -60,7 +62,12 @@ $actions = '<div class="button-pair">'
         <thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
         <tbody>
         <?php foreach ($lines as $l): ?>
-            <tr><td><?= e((string) ($l[0] ?? '')) ?></td><td><?= e((string) ($l[1] ?? '1')) ?></td><td><?= e((string) ($l[2] ?? '$0.00')) ?></td><td><?= e((string) ($l[3] ?? '$0.00')) ?></td></tr>
+            <tr>
+                <td><?= e((string) ($l[0] ?? '')) ?></td>
+                <td><?= e((string) ($l[1] ?? '1')) ?></td>
+                <td><?= e(format_money(parse_money((string) ($l[2] ?? '0')))) ?></td>
+                <td><?= e(format_money(parse_money((string) ($l[3] ?? '0')))) ?></td>
+            </tr>
         <?php endforeach; ?>
         </tbody>
     </table>
@@ -123,7 +130,7 @@ $actions = '<div class="button-pair">'
         <div style="margin-top: 24px; padding: 14px 18px; background: var(--amber-bg); border: 1px solid var(--amber-border); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
             <div>
                 <strong style="color: var(--amber-text); font-size: 12px;">Outstanding balance of <?= e(format_money($nb['balance'])) ?></strong>
-                <p style="color: var(--gray-600); font-size: 11px; margin: 2px 0 0;">Please present your Bill No. <code><?= e($invCode) ?></code> to the Hospital Cashier to pay via Cash, Card, GCash, or Insurance.</p>
+                <p style="color: var(--gray-600); font-size: 11px; margin: 2px 0 0;">Please present your Bill No. <code><?= e($invCode) ?></code> to the West Metro Medical Center Cashier to settle via Cash, Card, HMO, or PhilHealth.</p>
             </div>
             <?= badge('Payment Pending', 'warning') ?>
         </div>

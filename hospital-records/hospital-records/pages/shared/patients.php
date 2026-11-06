@@ -1,82 +1,200 @@
 <?php
-/** Patients list — used by Front desk (→ profile) and Doctor (→ clinical history). */
-$q      = trim((string) ($_GET['q'] ?? ''));
-$filter = (string) ($_GET['filter'] ?? 'All patients');
-$allPatients = $state['patients'] ?? patients_data();
+declare(strict_types=1);
 
-$patients = array_values(array_filter(
-    $allPatients,
-    static fn ($p) => row_matches(array_merge($p, [patient_age_label($p[1] ?? '', true), patient_age_label($p[1] ?? '', false)]), $q)
-));
-if ($filter === 'Recently added') {
-    $patients = array_slice($patients, 0, 3);
+$q         = trim((string) ($_GET['q'] ?? ''));
+$dobFilter = trim((string) ($_GET['dob'] ?? ''));
+$phFilter  = trim((string) ($_GET['phone'] ?? ''));
+$stFilter  = (string) ($_GET['reg_status'] ?? 'All statuses');
+
+$allPatients = $state['patients'] ?? [];
+
+// If Doctor, show patients they have seen or are assigned to (or all if searching)
+if ($role === 'Doctor' && $q === '' && $dobFilter === '' && $phFilter === '') {
+    $docName = current_user_name('Doctor');
+    $docPts  = [];
+    foreach ($state['appointments'] ?? [] as $a) {
+        if (strcasecmp((string) ($a[5] ?? ''), $docName) === 0) {
+            $docPts[mb_strtolower((string) ($a[1] ?? ''))] = true;
+        }
+    }
+    foreach ($state['admissions'] ?? [] as $ad) {
+        if (strcasecmp((string) ($ad['doctor_name'] ?? ($ad[4] ?? '')), $docName) === 0) {
+            $docPts[mb_strtolower((string) ($ad['patient_name'] ?? ($ad[0] ?? '')))] = true;
+        }
+    }
+    foreach ($state['records'] ?? [] as $ptKey => $rList) {
+        foreach ($rList as $r) {
+            if (strcasecmp((string) ($r['doctor'] ?? ''), $docName) === 0) {
+                $docPts[mb_strtolower((string) $ptKey)] = true;
+            }
+        }
+    }
+    if (!empty($docPts)) {
+        $filteredByDoc = array_values(array_filter($allPatients, static fn ($p) => isset($docPts[mb_strtolower((string) ($p[0] ?? ''))])));
+        if (!empty($filteredByDoc)) {
+            $allPatients = $filteredByDoc;
+        }
+    }
 }
 
-$isDoctor   = $role === 'Doctor';
-$detailName = $isDoctor ? 'history' : 'profile';
-$linkLabel  = $isDoctor ? 'View history' : 'View profile';
+$filtered = array_values(array_filter($allPatients, static function (array $p) use ($q, $dobFilter, $stFilter): bool {
+    $isProv    = is_provisional_patient($p);
+    $regStatus = $isProv ? 'Provisional' : 'Registered';
+    $mrn       = patient_mrn_display($p, '');
 
+    if ($stFilter !== 'All statuses' && strcasecmp($regStatus, $stFilter) !== 0) {
+        return false;
+    }
+    if ($dobFilter !== '') {
+        $pDobIso = strtotime((string) ($p[1] ?? '')) !== false ? date('Y-m-d', strtotime((string) $p[1])) : '';
+        if ($pDobIso !== $dobFilter && mb_stripos((string) ($p[1] ?? ''), $dobFilter) === false) {
+            return false;
+        }
+    }
+    if ($q !== '') {
+        return row_matches([$p[0] ?? '', $mrn, $p[1] ?? '', $p[2] ?? '', $p[7] ?? '', $regStatus], $q);
+    }
+    return true;
+}));
+
+$paged = paginate_rows($filtered, 10);
+
+$actionsHtml = '';
+if ($role === 'Staff') {
+    $actionsHtml = '<div style="display:flex; gap:10px; flex-wrap:wrap;">'
+        . button('Quick add', [
+            'variant' => 'secondary',
+            'icon'    => 'plus',
+            'href'    => url(['page' => 'patients', 'modal' => 'Quick add provisional', 'q' => $q, 'dob' => $dobFilter]),
+        ])
+        . button('Register patient', [
+            'icon' => 'plus',
+            'href' => url(['page' => 'patients', 'modal' => 'Register patient', 'q' => $q, 'dob' => $dobFilter]),
+        ])
+        . '</div>';
+}
+?>
+<?= page_title(
+    'Patients',
+    $role === 'Staff'
+        ? 'Search by name or birthdate before creating a record. Issue MRNs only at full registration.'
+        : 'Search patients you have seen or are assigned to, and open their clinical chart.',
+    $actionsHtml
+) ?>
+
+<?php if ($role === 'Staff' && ($q !== '' || $dobFilter !== '') && count($filtered) > 0): ?>
+    <div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:10px; padding:12px 16px; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13px; color:#92400e;">
+        <div>
+            <strong>⚠️ Likely Patient Match Found (<?= count($filtered) ?> record<?= count($filtered) === 1 ? '' : 's' ?>):</strong>
+            Always verify if the patient is already in the list below before creating a new record to prevent duplicates.
+        </div>
+    </div>
+<?php endif; ?>
+
+<?php
 $toolbar = toolbar_open('patients')
-    . search_box('Search by ID, name, birthday, age, phone, or address...', 'q', $q)
-    . '<div class="toolbar-right">'
-    . select_field('', 'filter', ['All patients', 'Recently added'], $filter)
-    . filter_button()
-    . '</div>'
+    . search_box('Search by name or MRN...', 'q', $q)
+    . '<div class="input-wrap" style="min-width:155px;"><input type="date" name="dob" value="' . e($dobFilter) . '" title="Filter by Birthdate" style="height:42px; padding:0 10px; border:1px solid var(--gray-200); border-radius:8px; font-size:13px;"></div>'
+    . select_field('', 'reg_status', ['All statuses', 'Registered', 'Provisional'], $stFilter)
+    . filter_button('Search')
+    . (($q !== '' || $dobFilter !== '' || $stFilter !== 'All statuses')
+        ? '<a class="btn btn-ghost" href="' . e(url(['page' => 'patients'])) . '"><span>Reset</span></a>'
+        : '')
     . toolbar_close();
 
-$action = $isDoctor ? '' : button('Register patient', [
-    'icon' => 'plus',
-    'href' => url(['page' => 'patients', 'modal' => 'Register patient']),
-]);
-?>
-<?= page_title('Patients', 'Find patient records, birthday, age, and register new patients.', $action) ?>
+echo table_open([
+    'Patient Name',
+    'MRN',
+    'Status',
+    'Birthdate & Age',
+    'Sex',
+    'Phone Number',
+    'Address',
+    'Actions',
+], $toolbar);
 
-<?= table_open(['Patient ID', 'Patient', 'Birthday', 'Age', 'Phone', 'Address', 'Status', 'Actions'], $toolbar) ?>
-<?php foreach ($patients as $idx => $p):
-    $link     = url(['page' => 'patients', 'detail' => $detailName, 'patient' => $p[0]]);
-    $ptId     = $p[8] ?? ('P-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT));
-    $bdate    = format_birthdate($p[1] ?? '');
-    $age      = patient_age_label($bdate, true);
-    $ptStatus = $p['status'] ?? 'Active';
+foreach ($paged['rows'] as $p):
+    $isProv    = is_provisional_patient($p);
+    $regStatus = $isProv ? 'Provisional' : 'Registered';
+    $mrn       = patient_mrn_display($p, '');
+    $phVer     = !empty($p['phone_verified']);
+    $isStale   = is_stale_provisional($p);
+    $ptKey     = (string) ($p[8] ?? $p[0]);
 ?>
     <tr>
-        <td><code><?= e($ptId) ?></code></td>
         <td>
-            <a class="person-cell" href="<?= e($link) ?>">
-                <span class="mini-avatar"><?= e($p[4]) ?></span>
-                <strong><?= e($p[0]) ?></strong>
-            </a>
+            <div class="cell-user">
+                <?= mini_avatar((string) $p[0]) ?>
+                <div>
+                    <strong><?= e((string) $p[0]) ?></strong>
+                    <?php if (!empty($p['email'])): ?>
+                        <small style="display:block; color:var(--gray-500); font-size:11.5px;"><?= e((string) $p['email']) ?></small>
+                    <?php endif; ?>
+                </div>
+            </div>
         </td>
-        <td><?= e($bdate) ?></td>
-        <td><strong><?= e($age) ?></strong></td>
-        <td><?= e($p[2] ?: '—') ?></td>
-        <td style="max-width:240px; font-size:12.5px;"><?= e($p[7] ?: '—') ?></td>
-        <td><?= badge($ptStatus, $ptStatus === 'Active' ? 'success' : 'danger') ?></td>
         <td>
-            <div class="row-actions">
-                <a class="text-link" href="<?= e($link) ?>"><?= e($linkLabel) ?> <?= icon('arrow', 14) ?></a>
-                <?php if ($isDoctor): ?>
-                    <a class="text-link" style="color:var(--teal-800); font-weight:600;" href="<?= e(url(['page' => 'patients', 'detail' => 'new-record', 'patient' => $p[0]])) ?>">
-                        + New record
+            <?php if ($mrn !== ''): ?>
+                <code style="font-weight:700; color:var(--teal-800); background:var(--teal-50); padding:3px 8px; border-radius:6px; font-size:12.5px;"><?= e($mrn) ?></code>
+            <?php else: ?>
+                <span style="color:var(--gray-400); font-size:12px;">— <em>(None)</em></span>
+            <?php endif; ?>
+        </td>
+        <td>
+            <?= badge($regStatus, status_tone($regStatus)) ?>
+            <?php if ($isStale): ?>
+                <?= badge('Stale', 'danger') ?>
+            <?php endif; ?>
+        </td>
+        <td>
+            <div><?= e(format_birthdate((string) $p[1])) ?></div>
+            <small style="color:var(--gray-500);"><?= e(patient_age_label((string) $p[1], true)) ?></small>
+        </td>
+        <td><?= e((string) ($p[5] ?? '—')) ?></td>
+        <td>
+            <div style="font-family:monospace; font-size:13px;"><?= e((string) $p[2]) ?></div>
+            <?php if ($isProv || !$phVer): ?>
+                <small style="color:var(--amber-700); font-size:11px;">Unverified</small>
+            <?php else: ?>
+                <small style="color:var(--teal-700); font-size:11px;">✓ OTP Verified</small>
+            <?php endif; ?>
+        </td>
+        <td style="max-width:210px; font-size:12.5px; color:var(--gray-600);">
+            <?= e($isProv ? 'Pending check-in verification' : (string) ($p[7] ?: '—')) ?>
+        </td>
+        <td>
+            <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+                <?php if ($role === 'Staff'): ?>
+                    <a class="btn btn-secondary btn-sm" href="<?= e(url(['page' => 'patients', 'detail' => 'profile', 'patient' => $p[0]])) ?>">
+                        <span>View</span>
+                    </a>
+                    <?php if ($isProv): ?>
+                        <a class="btn btn-primary btn-sm" href="<?= e(url(['page' => 'patients', 'modal' => 'Complete registration', 'patient' => $p[0]])) ?>">
+                            <span>Complete registration</span>
+                        </a>
+                    <?php endif; ?>
+                    <a class="btn btn-secondary btn-sm" href="<?= e(url(['page' => 'book', 'patient' => $p[0]])) ?>">
+                        <span>Book</span>
                     </a>
                 <?php else: ?>
-                    <?= post_button('', 'toggle_patient', ['patient_id' => $ptId], [
-                        'plain' => true,
-                        'class' => 'text-link',
-                        'html'  => $ptStatus === 'Active' ? 'Disable' : 'Enable',
-                    ]) ?>
-                    <?= post_button('', 'delete_patient', ['patient_id' => $ptId], [
-                        'plain' => true,
-                        'class' => 'danger-link',
-                        'html'  => icon('trash', 14) . ' Delete',
-                    ]) ?>
+                    <a class="btn btn-secondary btn-sm" href="<?= e(url(['page' => 'patients', 'detail' => 'history', 'patient' => $p[0]])) ?>">
+                        <span>Open Chart</span>
+                    </a>
+                    <?php if (!$isProv): ?>
+                        <a class="btn btn-primary btn-sm" href="<?= e(url(['page' => 'consultation', 'patient' => $p[0]])) ?>">
+                            <span>Consult</span>
+                        </a>
+                    <?php endif; ?>
                 <?php endif; ?>
             </div>
         </td>
     </tr>
 <?php endforeach; ?>
-<?= table_close(count($patients) . ' of ' . count($allPatients) . ' patients', false) ?>
 
-<?php if (!$patients): ?>
-    <?= filtered_empty('No patients match this search.') ?>
+<?php if (!$paged['rows']): ?>
+    <tr>
+        <td colspan="8"><?= filtered_empty('No matching patient records found.') ?></td>
+    </tr>
 <?php endif; ?>
+
+<?= table_close($paged['label'], true, $paged['pages']) ?>

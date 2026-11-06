@@ -12,29 +12,30 @@ function badge(string $text, string $tone = 'neutral'): string
 
 /**
  * Button / link-button.
- * opts: variant (primary|secondary|ghost|danger), icon, href, type
+ * opts: variant (primary|secondary|ghost|danger), icon, href, type, class, attrs
  */
 function button(string $label, array $opts = []): string
 {
     $variant = $opts['variant'] ?? 'primary';
     $icon    = isset($opts['icon']) ? icon($opts['icon'], 17) : '';
     $inner   = $icon . '<span>' . e($label) . '</span>';
-    $class   = 'btn btn-' . e($variant);
+    $class   = 'btn btn-' . e($variant) . (!empty($opts['class']) ? ' ' . e($opts['class']) : '');
+    $attrs   = !empty($opts['attrs']) ? ' ' . $opts['attrs'] : '';
 
     if (isset($opts['href'])) {
-        return '<a class="' . $class . '" href="' . e($opts['href']) . '">' . $inner . '</a>';
+        return '<a class="' . $class . '" href="' . e($opts['href']) . '"' . $attrs . '>' . $inner . '</a>';
     }
-    return '<button class="' . $class . '" type="' . e($opts['type'] ?? 'button') . '">' . $inner . '</button>';
+    return '<button class="' . $class . '" type="' . e($opts['type'] ?? 'button') . '"' . $attrs . '>' . $inner . '</button>';
 }
 
 /** A POST form wrapping one button (used for actions that change state). */
 function post_button(string $label, string $action, array $fields = [], array $opts = []): string
 {
     $hidden = '<input type="hidden" name="action" value="' . e($action) . '">'
-        . '<input type="hidden" name="return" value="' . e(url($_GET)) . '">'
+        . '<input type="hidden" name="return" value="' . e($opts['return'] ?? url($_GET)) . '">'
         . csrf_field();
     foreach ($fields as $k => $v) {
-        $hidden .= '<input type="hidden" name="' . e($k) . '" value="' . e($v) . '">';
+        $hidden .= '<input type="hidden" name="' . e((string) $k) . '" value="' . e((string) $v) . '">';
     }
 
     $class = $opts['class'] ?? '';
@@ -44,30 +45,44 @@ function post_button(string $label, string $action, array $fields = [], array $o
         $btn = '<button type="submit" class="btn btn-' . e($opts['variant'] ?? 'primary') . ' ' . e($class) . '">'
             . (isset($opts['icon']) ? icon($opts['icon'], 17) : '') . '<span>' . e($label) . '</span></button>';
     }
+    $confirmMsg = $opts['confirm_msg'] ?? 'Are you sure about this action?';
     $confirmAttr = (($opts['confirm'] ?? true) !== false && $action !== 'read_notifications')
-        ? ' onsubmit="return confirm(\'Are you sure about this action?\');"'
+        ? ' onsubmit="return confirm(' . htmlspecialchars(json_encode($confirmMsg), ENT_QUOTES, 'UTF-8') . ');"'
         : '';
     return '<form method="post" action="index.php" class="inline-form"' . $confirmAttr . '>' . $hidden . $btn . '</form>';
 }
 
-/** Button that only shows a confirmation toast (matches the prototype's demo-only buttons). */
+/** Button that only shows a confirmation toast. */
 function notify_button(string $label, string $message, array $opts = []): string
 {
     return post_button($label, 'notify', ['message' => $message], $opts);
 }
 
-function field(string $label, string $name, string $placeholder = '', string $type = 'text', string $value = ''): string
+function format_label(string $label): string
 {
-    return '<label class="field"><span class="field-label">' . e($label) . '</span><span class="input-wrap">'
-        . '<input type="' . e($type) . '" name="' . e($name) . '" placeholder="' . e($placeholder) . '" value="' . e($value) . '">'
-        . '</span></label>';
+    if (str_contains($label, '*')) {
+        $escaped = e($label);
+        return preg_replace('/(\*+)/', '<span class="req-star" style="color:#dc2626; font-weight:700;">$1</span>', $escaped);
+    }
+    return e($label);
 }
 
-/** Image file input (JPG/PNG/GIF/WEBP). Camera capture is offered on mobile. */
-function file_field(string $label, string $name): string
+function field(string $label, string $name, string $placeholder = '', string $type = 'text', string $value = '', array $opts = []): string
 {
-    return '<label class="field"><span class="field-label">' . e($label) . '</span><span class="input-wrap">'
-        . '<input type="file" class="file-input" name="' . e($name) . '" accept="image/jpeg,image/png,image/gif,image/webp" required>'
+    $req = !empty($opts['required']) ? ' required' : '';
+    $ro  = !empty($opts['readonly']) ? ' readonly' : '';
+    $id  = !empty($opts['id']) ? ' id="' . e($opts['id']) . '"' : '';
+    $hint = !empty($opts['hint']) ? '<small class="field-hint">' . e($opts['hint']) . '</small>' : '';
+    return '<label class="field"><span class="field-label">' . format_label($label) . '</span><span class="input-wrap">'
+        . '<input type="' . e($type) . '" name="' . e($name) . '"' . $id . ' placeholder="' . e($placeholder) . '" value="' . e($value) . '"' . $req . $ro . '>'
+        . '</span>' . $hint . '</label>';
+}
+
+/** Image file input (JPG/PNG/GIF/WEBP). */
+function file_field(string $label, string $name, bool $required = true): string
+{
+    return '<label class="field"><span class="field-label">' . format_label($label) . '</span><span class="input-wrap">'
+        . '<input type="file" class="file-input" name="' . e($name) . '" accept="image/jpeg,image/png,image/gif,image/webp"' . ($required ? ' required' : '') . '>'
         . '</span><small class="field-hint">JPG, PNG, GIF or WEBP · max 5 MB</small></label>';
 }
 
@@ -78,21 +93,24 @@ function proof_thumb(string $path, string $alt): string
         . '<img src="' . e($path) . '" alt="' . e($alt) . '"><span>View</span></a>';
 }
 
-
-function select_field(string $label, string $name, array $options, string $selected = ''): string
+function select_field(string $label, string $name, array $options, string $selected = '', array $opts = []): string
 {
-    $html = '<label class="field"><span class="field-label">' . e($label) . '</span><span class="input-wrap">'
-        . '<select name="' . e($name) . '">';
-    foreach ($options as $opt) {
-        $html .= '<option' . ($opt === $selected ? ' selected' : '') . '>' . e($opt) . '</option>';
+    $id  = !empty($opts['id']) ? ' id="' . e($opts['id']) . '"' : '';
+    $req = !empty($opts['required']) ? ' required' : '';
+    $html = '<label class="field"><span class="field-label">' . format_label($label) . '</span><span class="input-wrap">'
+        . '<select name="' . e($name) . '"' . $id . $req . '>';
+    foreach ($options as $k => $opt) {
+        $val = is_int($k) ? (string) $opt : (string) $k;
+        $lbl = (string) $opt;
+        $html .= '<option value="' . e($val) . '"' . ($val === $selected || $lbl === $selected ? ' selected' : '') . '>' . e($lbl) . '</option>';
     }
     return $html . '</select>' . icon('down', 16) . '</span></label>';
 }
 
-function textarea_field(string $label, string $name, string $placeholder = ''): string
+function textarea_field(string $label, string $name, string $placeholder = '', string $value = ''): string
 {
-    return '<label class="field"><span class="field-label">' . e($label) . '</span>'
-        . '<textarea name="' . e($name) . '" placeholder="' . e($placeholder) . '"></textarea></label>';
+    return '<label class="field"><span class="field-label">' . format_label($label) . '</span>'
+        . '<textarea name="' . e($name) . '" placeholder="' . e($placeholder) . '">' . e($value) . '</textarea></label>';
 }
 
 function search_box(string $placeholder = 'Search...', string $name = 'q', string $value = ''): string
@@ -104,7 +122,7 @@ function search_box(string $placeholder = 'Search...', string $name = 'q', strin
 
 function page_title(string $title, string $description, string $action = ''): string
 {
-    return '<div class="page-heading"><div><p class="eyebrow">Hospital Records System</p>'
+    return '<div class="page-heading"><div><p class="eyebrow">' . e(APP_NAME) . ' · Zamboanga City</p>'
         . '<h1>' . e($title) . '</h1><p>' . e($description) . '</p></div>'
         . ($action !== '' ? '<div class="heading-action">' . $action . '</div>' : '') . '</div>';
 }
@@ -112,7 +130,7 @@ function page_title(string $title, string $description, string $action = ''): st
 function logo(bool $light = false): string
 {
     return '<div class="logo' . ($light ? ' logo-light' : '') . '"><span class="logo-mark"><span></span><span></span></span>'
-        . '<span><strong>' . e(APP_NAME) . '</strong><small>Records system</small></span></div>';
+        . '<span><strong>West Metro</strong><small>Medical Center · ZC</small></span></div>';
 }
 
 function stat_card(string $label, string $value, string $trend, string $icon, string $tone = 'teal'): string
@@ -126,19 +144,66 @@ function mini_avatar(string $name): string
     return '<span class="mini-avatar">' . e(initials($name, 3)) . '</span>';
 }
 
-/** Tone for a status word. */
+/** Tone for a status word across all portals. */
 function status_tone(string $status): string
 {
     return match ($status) {
-        'Paid', 'Completed', 'Done', 'Active', 'Checked in', 'Available', 'Cash' => 'success',
-        'Pending', 'Waiting', 'Partial', 'Insurance' => 'warning',
-        'Unpaid', 'Disabled', 'Cancelled' => 'danger',
-        'Disabled-neutral' => 'neutral',
+        'Paid', 'Completed', 'Done', 'Active', 'Registered', 'Checked in', 'Checked-in', 'Available', 'Vacant', 'Cleared', 'Cash', 'Recovered / Improved' => 'success',
+        'Pending', 'Waiting', 'Partial', 'Provisional', 'For discharge', 'In consultation', 'In progress', 'Exception', 'HMO', 'PhilHealth', 'Insurance', 'Urgent' => 'warning',
+        'Unpaid', 'Disabled', 'Deactivated', 'Cancelled', 'No-show', 'Maintenance', 'Out of service', 'Stale', 'STAT', 'Deceased' => 'danger',
+        'Disabled-neutral', 'Discharged', 'Archived' => 'neutral',
         default => 'info',
     };
 }
 
-/* --------------------------- tables --------------------------- */
+/** Render simulated SMS / Email notification banner when present in session. */
+function render_sim_banners(): string
+{
+    $msgs = $_SESSION['sim_messages'] ?? [];
+    if (empty($msgs)) {
+        return '';
+    }
+    $html = '<div style="display:flex; flex-direction:column; gap:8px; margin-bottom:16px;">';
+    foreach ($msgs as $idx => $m) {
+        $isSms = ($m['channel'] ?? 'SMS') === 'SMS';
+        $bg    = $isSms ? '#f0fdfa' : '#eff6ff';
+        $bdr   = $isSms ? '#99f6e4' : '#bfdbfe';
+        $txt   = $isSms ? '#0f766e' : '#1d4ed8';
+        $html .= '<div style="background:' . $bg . '; border:1px solid ' . $bdr . '; border-radius:10px; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13px; color:' . $txt . ';">';
+        $html .= '<div><strong>' . ($isSms ? '📱 Simulated SMS' : '✉️ Simulated Email') . ' to ' . e((string) ($m['recipient'] ?? '')) . ':</strong> ' . e((string) ($m['message'] ?? ''));
+        if (!empty($m['link_url'])) {
+            $html .= ' — <a href="' . e((string) $m['link_url']) . '" style="font-weight:700; text-decoration:underline; color:' . $txt . ';">' . e((string) ($m['link_label'] ?: 'Open Link')) . '</a>';
+        }
+        $html .= '</div>';
+        $html .= '<a href="' . e(url_with(['clear_sim' => 1])) . '" style="font-size:12px; color:' . $txt . '; opacity:0.75; text-decoration:none; white-space:nowrap;">Dismiss ×</a>';
+        $html .= '</div>';
+    }
+    $html .= '</div>';
+    return $html;
+}
+
+/* --------------------------- tables & pagination --------------------------- */
+
+/** Slice an array of rows for the current page ?p= and return ['rows' => array, 'label' => '1–10 of 24', 'page' => int, 'pages' => int, 'total' => int]. */
+function paginate_rows(array $allRows, int $perPage = 10, string $param = 'p'): array
+{
+    $total = count($allRows);
+    $pages = max(1, (int) ceil($total / max(1, $perPage)));
+    $page  = max(1, min($pages, (int) ($_GET[$param] ?? 1)));
+    $offset = ($page - 1) * $perPage;
+    $slice  = array_slice($allRows, $offset, $perPage, true);
+    $start  = $total > 0 ? ($offset + 1) : 0;
+    $end    = min($total, $offset + count($slice));
+    $label  = $total > 0 ? ($start . '–' . $end . ' of ' . $total) : '0 of 0';
+
+    return [
+        'rows'  => $slice,
+        'label' => $label,
+        'page'  => $page,
+        'pages' => $pages,
+        'total' => $total,
+    ];
+}
 
 /** Opens a GET form carrying the params that must survive a filter submit. */
 function toolbar_open(string $page, array $keep = []): string
@@ -146,7 +211,9 @@ function toolbar_open(string $page, array $keep = []): string
     $html = '<form method="get" action="index.php" class="table-toolbar">'
         . '<input type="hidden" name="page" value="' . e($page) . '">';
     foreach ($keep as $k => $v) {
-        $html .= '<input type="hidden" name="' . e($k) . '" value="' . e($v) . '">';
+        if ($v !== null && $v !== '') {
+            $html .= '<input type="hidden" name="' . e((string) $k) . '" value="' . e((string) $v) . '">';
+        }
     }
     return $html;
 }
@@ -156,10 +223,10 @@ function toolbar_close(): string
     return '</form>';
 }
 
-/** "Apply" button for toolbars (there is no JS to auto-submit on change). */
-function filter_button(): string
+/** "Apply" button for toolbars. */
+function filter_button(string $label = 'Apply'): string
 {
-    return '<button class="btn btn-secondary" type="submit"><span>Apply</span></button>';
+    return '<button class="btn btn-secondary" type="submit"><span>' . e($label) . '</span></button>';
 }
 
 function table_open(array $headers, string $toolbar = ''): string
@@ -171,21 +238,38 @@ function table_open(array $headers, string $toolbar = ''): string
     return $html . '</tr></thead><tbody>';
 }
 
-function table_close(string $count = '1–5 of 48', bool $pager = true): string
+function table_close(string $count = '1–10', bool $pager = true, mixed $totalPages = 3, mixed $currentPage = null, mixed $extraParam = null): string
 {
     $html = '</tbody></table></div><div class="pagination"><span>Showing ' . e($count) . '</span>';
     if ($pager) {
-        $p = max(1, min(3, (int) ($_GET['p'] ?? 1)));
-        $html .= '<div>';
-        $html .= $p === 1
-            ? '<button disabled>Previous</button>'
-            : '<a href="' . e(url_with(['p' => $p - 1])) . '">Previous</a>';
-        foreach ([1, 2, 3] as $n) {
-            $html .= '<a class="' . ($n === $p ? 'current' : '') . '" href="' . e(url_with(['p' => $n])) . '">' . $n . '</a>';
+        $param = 'p';
+        $numPages = 1;
+
+        // Support various calling styles:
+        // 1. table_close('label', true, 5, 'p') -> $totalPages=5, $currentPage='p'
+        // 2. table_close('label', true, $totalCount, $page, $pagesCount) -> $totalPages=$totalCount, $currentPage=$page, $extraParam=$pagesCount
+        // 3. table_close('label', true, $pagesCount, $page) -> $totalPages=$pagesCount
+        if (is_int($extraParam) || is_numeric($extraParam)) {
+            $numPages = max(1, (int) $extraParam);
+            $param = is_string($currentPage) ? $currentPage : 'p';
+        } elseif (is_string($currentPage)) {
+            $param = $currentPage;
+            $numPages = max(1, (int) $totalPages);
+        } else {
+            $numPages = max(1, (int) $totalPages);
         }
-        $html .= $p === 3
+
+        $p = max(1, min($numPages, (int) ($_GET[$param] ?? 1)));
+        $html .= '<div>';
+        $html .= $p <= 1
+            ? '<button disabled>Previous</button>'
+            : '<a href="' . e(url_with([$param => $p - 1])) . '">Previous</a>';
+        for ($n = 1; $n <= $numPages; $n++) {
+            $html .= '<a class="' . ($n === $p ? 'current' : '') . '" href="' . e(url_with([$param => $n])) . '">' . $n . '</a>';
+        }
+        $html .= $p >= $numPages
             ? '<button disabled>Next</button>'
-            : '<a href="' . e(url_with(['p' => $p + 1])) . '">Next</a>';
+            : '<a href="' . e(url_with([$param => $p + 1])) . '">Next</a>';
         $html .= '</div>';
     }
     return $html . '</div></div>';
@@ -199,7 +283,16 @@ function filtered_empty(string $message): string
 /** Case-insensitive "row contains query" test. */
 function row_matches(array $row, string $query): bool
 {
-    return $query === '' || mb_stripos(implode(' ', $row), $query) !== false;
+    if ($query === '') {
+        return true;
+    }
+    $flat = [];
+    foreach ($row as $v) {
+        if (is_scalar($v)) {
+            $flat[] = (string) $v;
+        }
+    }
+    return mb_stripos(implode(' ', $flat), $query) !== false;
 }
 
 /** Tabs rendered as links (server-side). */
@@ -207,7 +300,7 @@ function tabs(array $labels, string $active, string $param = 'tab'): string
 {
     $html = '<div class="tabs">';
     foreach ($labels as $label) {
-        $html .= '<a class="' . ($label === $active ? 'active' : '') . '" href="' . e(url_with([$param => $label])) . '">' . e($label) . '</a>';
+        $html .= '<a class="' . ($label === $active ? 'active' : '') . '" href="' . e(url_with([$param => $label, 'p' => null])) . '">' . e($label) . '</a>';
     }
     return $html . '</div>';
 }
@@ -240,7 +333,7 @@ function in_range(string|int $date, string $from, string $to): bool
     return ($from === '' || $day >= $from) && ($to === '' || $day <= $to);
 }
 
-/** From/To date range inputs — no label wrappers, flush 42px height to match toolbar controls. */
+/** From/To date range inputs. */
 function date_range_fields(string $from, string $to): string
 {
     $fAttr = ' value="' . e($from) . '"' . ($to   !== '' ? ' max="' . e($to)   . '"' : '');

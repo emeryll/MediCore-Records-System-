@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 $patientParam = trim((string) ($_GET['patient'] ?? ($state['patients'][0][0] ?? 'Patient')));
 $ptIdentity   = resolve_patient_identity($state, $patientParam);
 $patient      = $ptIdentity['name'];
@@ -9,7 +11,6 @@ $open         = isset($_GET['open']) ? (int) $_GET['open'] : 0;
 $curPage      = (string) ($_GET['page'] ?? 'my-appointments');
 $base         = ['page' => $curPage, 'detail' => 'history', 'patient' => $patient];
 
-// Clinical summary: aggregate conditions and meds from all records
 $conditions = [];
 $meds       = [];
 foreach ($records as $rec) {
@@ -25,19 +26,20 @@ foreach ($records as $rec) {
 $conditions = array_unique(array_slice($conditions, 0, 4));
 $meds       = array_unique(array_slice($meds, 0, 4));
 $ptRecord   = $ptIdentity['record'] ?? find_patient_record($state, $patient);
+$ptMrn      = $ptRecord ? patient_mrn_display($ptRecord) : $ptId;
 $ptDob      = format_birthdate($ptRecord[1] ?? '');
 $ptAge      = patient_age_label($ptDob, false, '—');
 $ptSex      = $ptRecord[5] ?? 'Not specified';
 ?>
-<a class="back-link" href="<?= e(url(['page' => $curPage])) ?>">← Back to appointments</a>
+<a class="back-link" href="<?= e(url(['page' => $curPage])) ?>">← Back</a>
 
 <div class="patient-header">
     <div class="large-avatar"><?= e(initials($patient)) ?></div>
     <div>
         <h1><?= e($patient) ?></h1>
-        <p>Patient ID <strong><?= e($ptId) ?></strong> · Birthday: <strong><?= e($ptDob) ?></strong> · Age: <strong><?= e($ptAge) ?></strong> · <?= count($records) ?> visit<?= count($records) !== 1 ? 's' : '' ?> on record</p>
+        <p>MRN <strong><?= e($ptMrn ?: 'Provisional (Unregistered)') ?></strong> · Birthday: <strong><?= e($ptDob) ?></strong> · Age: <strong><?= e($ptAge) ?></strong> · <?= count($records) ?> visit<?= count($records) !== 1 ? 's' : '' ?> on record</p>
     </div>
-    <?= button('New medical record', ['href' => url(['page' => $curPage, 'detail' => 'new-record', 'patient' => $patient])]) ?>
+    <?= button('Start Consultation', ['href' => url(['page' => $curPage, 'detail' => 'new-record', 'patient' => $patient])]) ?>
 </div>
 
 <div class="history-layout">
@@ -45,7 +47,7 @@ $ptSex      = $ptRecord[5] ?? 'Not specified';
         <div class="panel-head">
             <div>
                 <h2>Visit history</h2>
-                <p>Clinical notes, prescriptions, and treatment history for <?= e($patient) ?></p>
+                <p>Clinical notes, diagnoses, prescriptions, lab orders, and follow-up dates for <?= e($patient) ?></p>
             </div>
         </div>
 
@@ -62,7 +64,7 @@ $ptSex      = $ptRecord[5] ?? 'Not specified';
                         <div>
                             <time><?= e($v['date'] ?? '') ?></time>
                             <strong><?= e($v['visit_type'] ?? 'Consultation') ?></strong>
-                            <p><?= e($v['doctor'] ?? 'Physician') ?></p>
+                            <p><?= e($v['doctor'] ?? 'Physician') ?><?= !empty($v['follow_up']) ? ' · Follow-up: ' . e($v['follow_up']) : '' ?></p>
                         </div>
                         <?= badge(
                             $v['status'] ?? 'Completed',
@@ -91,6 +93,12 @@ $ptSex      = $ptRecord[5] ?? 'Not specified';
                                 <div>
                                     <span>Clinical notes</span>
                                     <p class="history-notes"><?= e($v['notes']) ?></p>
+                                </div>
+                            <?php endif; ?>
+                            <?php if (!empty($v['follow_up'])): ?>
+                                <div>
+                                    <span>Follow-up date</span>
+                                    <strong><?= e($v['follow_up']) ?></strong>
                                 </div>
                             <?php endif; ?>
                             <?php if (!empty($v['diagnoses'])): ?>
@@ -133,7 +141,7 @@ $ptSex      = $ptRecord[5] ?? 'Not specified';
     <aside class="panel quick-summary">
         <h2>Patient &amp; clinical summary</h2>
         <dl>
-            <div><dt>Patient ID</dt><dd><code><?= e($ptId) ?></code></dd></div>
+            <div><dt>MRN</dt><dd><code><?= e($ptMrn ?: 'Provisional') ?></code></dd></div>
             <div><dt>Birthday</dt><dd><?= e($ptDob) ?></dd></div>
             <div><dt>Age</dt><dd><?= e($ptAge) ?></dd></div>
             <div><dt>Sex</dt><dd><?= e($ptSex) ?></dd></div>

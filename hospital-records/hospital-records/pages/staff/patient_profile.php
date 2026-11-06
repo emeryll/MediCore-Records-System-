@@ -1,140 +1,160 @@
 <?php
-$patientName = trim((string) ($_GET['patient'] ?? ''));
-$tab = (string) ($_GET['tab'] ?? 'Appointments');
-if (!in_array($tab, ['Appointments', 'Admissions'], true)) {
-    $tab = 'Appointments';
+declare(strict_types=1);
+
+$patientParam = trim((string) ($_GET['patient'] ?? ''));
+$pt           = find_patient_record($state, $patientParam) ?: ($state['patients'][0] ?? null);
+
+if (!$pt) {
+    echo page_title('Patient Not Found', 'The requested patient record could not be located.');
+    echo button('← Back to Patients', ['variant' => 'secondary', 'href' => url(['page' => 'patients'])]);
+    return;
 }
 
-// Find patient in session state
-$patient = null;
-$patientIdx = 0;
-foreach ($state['patients'] as $idx => $p) {
-    if ($p[0] === $patientName) {
-        $patient = $p;
-        $patientIdx = $idx + 1;
-        break;
-    }
-}
-$patient ??= $state['patients'][0] ?? null;
-if ($patient === null): ?>
-    <a class="back-link" href="<?= e(url(['page' => 'patients'])) ?>">← Back to patients</a>
-    <?= filtered_empty('Patient record not found.') ?>
-<?php return; endif;
-$patientName = $patient[0];
+$ptName    = (string) ($pt[0] ?? 'Patient');
+$isProv    = is_provisional_patient($pt);
+$regStatus = $isProv ? 'Provisional' : 'Registered';
+$mrn       = patient_mrn_display($pt, '');
+$dob       = format_birthdate((string) ($pt[1] ?? ''));
+$age       = patient_age_label($dob, false, '—');
+$phone     = (string) ($pt[2] ?? '—');
+$sex       = (string) ($pt[5] ?? '—');
+$addr      = (string) ($pt[7] ?? '—');
+$email     = (string) ($pt['email'] ?? '');
+$phVer     = !empty($pt['phone_verified']);
+$idChecked = !empty($pt['id_checked']);
+$consent   = !empty($pt['consent_given']);
+$createdBy = (string) ($pt['created_by'] ?? 'Front Desk Staff');
+$createdAt = (string) ($pt['created_at'] ?? '—');
+$upgBy     = (string) ($pt['upgraded_by'] ?? '');
+$upgAt     = (string) ($pt['upgraded_at'] ?? '');
 
-// Compute age from birthdate if possible
-$bdateFormatted = format_birthdate($patient[1] ?? '');
-$ageText        = patient_age_label($bdateFormatted, false, 'Age not specified');
-$ptId           = $patient[8] ?? ('P-' . str_pad((string) (1000 + $patientIdx), 4, '0', STR_PAD_LEFT));
-
-// Filter live appointments, admissions/discharges, and bills for this patient
-$ptAppointments = array_values(array_filter(
-    $state['appointments'],
-    static fn ($a) => $a[1] === $patientName
-));
-$ptAdmissions = array_values(array_filter(
-    $state['admissions'],
-    static fn ($a) => $a[0] === $patientName
-));
-$ptDischarges = array_values(array_filter(
-    $state['discharges'],
-    static fn ($d) => $d[0] === $patientName
-));
-$ptBills = array_values(array_filter(
-    $state['bills'],
-    static fn ($b) => $b[0] === $patientName
-));
+$ptAppts   = array_values(array_filter($state['appointments'] ?? [], static fn ($a) => strcasecmp((string) ($a[1] ?? ''), $ptName) === 0));
+$ptRecords = patient_medical_records($state, $ptName, (string) ($pt[8] ?? ''));
 ?>
-<a class="back-link" href="<?= e(url(['page' => 'patients'])) ?>">← Back to patients</a>
-
-<?php
-$ptStatus = $patient['status'] ?? 'Active';
-?>
-<div class="profile-hero">
-    <div class="large-avatar"><?= e($patient[4] ?? initials($patientName)) ?></div>
-    <div>
-        <?= badge($ptStatus === 'Active' ? 'Active patient' : 'Disabled patient', $ptStatus === 'Active' ? 'success' : 'danger') ?>
-        <h1><?= e($patientName) ?></h1>
-        <p>Patient ID <strong><?= e($ptId) ?></strong> · Birthday: <strong><?= e($bdateFormatted) ?></strong> · Age: <strong><?= e($ageText) ?></strong></p>
-    </div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-        <?= button('Edit details', ['variant' => 'secondary', 'icon' => 'edit', 'href' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $patientName, 'modal' => 'Edit patient'])]) ?>
-        <?= post_button($ptStatus === 'Active' ? 'Disable Patient' : 'Enable Patient', 'toggle_patient', ['patient_id' => $ptId, 'return' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $patientName])], [
-            'variant' => 'secondary',
-            'icon'    => 'shield',
-        ]) ?>
-        <?= post_button('Delete Patient', 'delete_patient', ['patient_id' => $ptId, 'return' => url(['page' => 'patients'])], [
-            'variant' => 'danger',
-            'icon'    => 'trash',
-        ]) ?>
-    </div>
+<div style="margin-bottom:14px;">
+    <a class="back-link" href="<?= e(url(['page' => 'patients'])) ?>">← Back to Patients</a>
 </div>
 
-<div class="profile-grid">
-    <div class="panel details-panel">
-        <h2>Patient details</h2>
-        <dl>
-            <div><dt>Birthday</dt><dd><?= e($bdateFormatted) ?></dd></div>
-            <div><dt>Age</dt><dd><?= e($ageText) ?></dd></div>
-            <div><dt>Sex</dt><dd><?= e($patient[5] ?? 'Not specified') ?></dd></div>
-            <div><dt>Phone</dt><dd><?= e($patient[2] ?: '—') ?></dd></div>
-            <div><dt>Address</dt><dd><?= e($patient[7] ?: '—') ?></dd></div>
-        </dl>
-    </div>
+<?= page_title(
+    $ptName,
+    $isProv
+        ? 'Provisional Record (Phone-in) · No MRN assigned until verified in person at check-in.'
+        : 'Registered Patient Record · MRN: ' . $mrn,
+    '<div style="display:flex; gap:10px; flex-wrap:wrap;">'
+    . ($isProv
+        ? button('Complete registration (Issue MRN)', [
+            'icon' => 'shield',
+            'href' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $ptName, 'modal' => 'Complete registration']),
+        ])
+        : button('Edit patient', [
+            'variant' => 'secondary',
+            'icon'    => 'edit',
+            'href'    => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $ptName, 'modal' => 'Edit patient']),
+        ]))
+    . button('Book appointment', [
+        'variant' => 'secondary',
+        'icon'    => 'calendar',
+        'href'    => url(['page' => 'book', 'patient' => $ptName]),
+    ])
+    . (!$isProv
+        ? button('Admit patient', [
+            'variant' => 'secondary',
+            'icon'    => 'bed',
+            'href'    => url(['page' => 'admissions', 'modal' => 'Admit patient', 'patient' => $ptName]),
+        ])
+        : '')
+    . '</div>'
+) ?>
 
-    <div class="panel profile-records">
-        <?= tabs(['Appointments', 'Admissions'], $tab) ?>
-        <div class="record-list">
-            <?php if ($tab === 'Appointments'): ?>
-                <?php if ($ptAppointments): ?>
-                    <?php foreach ($ptAppointments as $a): ?>
-                        <div class="record-row">
-                            <span class="record-icon"><?= icon('calendar') ?></span>
-                            <div>
-                                <strong><?= e($a[2]) ?> — <?= e($a[4]) ?></strong>
-                                <p><?= e(($a[7] ?? date('M d, Y')) . ' at ' . $a[0] . ' · ' . ($a[5] ?? '—')) ?></p>
-                            </div>
-                            <?= badge($a[3], status_tone($a[3])) ?>
-                        </div>
-                    <?php endforeach; ?>
-                <?php else: ?>
-                    <div class="empty-state">
-                        <?= icon('calendar', 28) ?>
-                        <strong>No appointments yet</strong>
-                        <p>No scheduled visits for <?= e($patientName) ?>.</p>
-                    </div>
-                <?php endif; ?>
-
-            <?php else: ?>
-                <?php if ($ptAdmissions || $ptDischarges): ?>
-                    <?php foreach ($ptAdmissions as $adm): ?>
-                        <div class="record-row">
-                            <span class="record-icon"><?= icon('bed') ?></span>
-                            <div>
-                                <strong><?= e($adm[1]) ?> · <?= e($adm[2]) ?></strong>
-                                <p>Admitted <?= e($adm[3]) ?> · Attending: <?= e($adm[4]) ?><?= !empty($adm[5]) ? ' · ' . e($adm[5]) : '' ?></p>
-                            </div>
-                            <?= badge('Admitted', 'info') ?>
-                        </div>
-                    <?php endforeach; ?>
-                    <?php foreach ($ptDischarges as $dis): ?>
-                        <div class="record-row">
-                            <span class="record-icon"><?= icon('clipboard') ?></span>
-                            <div>
-                                <strong><?= e($dis[1]) ?> · <?= e($dis[2]) ?></strong>
-                                <p>Discharged <?= e($dis[3]) ?></p>
-                            </div>
-                            <?= badge('Discharged', 'success') ?>
-                        </div>
-                    <?php endforeach; ?>
-                <?php else: ?>
-                    <div class="empty-state">
-                        <?= icon('bed', 28) ?>
-                        <strong>Admissions history</strong>
-                        <p>No active or past admissions for <?= e($patientName) ?>.</p>
-                    </div>
-                <?php endif; ?>
-            <?php endif; ?>
+<?php if ($isProv): ?>
+    <div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:12px; padding:16px 20px; margin-bottom:20px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+        <div>
+            <strong style="color:#92400e; font-size:15px;">⚠️ Provisional Patient Record (No MRN Yet)</strong>
+            <p style="margin:4px 0 0; color:#b45309; font-size:13.5px;">
+                This bare-bones entry was created for a phone-in booking. Inpatient admission, billing clearance, and online account activation are blocked until the patient arrives and completes full registration.
+            </p>
         </div>
+        <?= button('Complete registration now', [
+            'icon' => 'shield',
+            'href' => url(['page' => 'patients', 'detail' => 'profile', 'patient' => $ptName, 'modal' => 'Complete registration']),
+        ]) ?>
     </div>
+<?php endif; ?>
+
+<div class="content-grid">
+    <section class="panel">
+        <div class="panel-head">
+            <div>
+                <h2>Patient Demographics &amp; Verification</h2>
+                <p>Identity, contact, and registration audit trail</p>
+            </div>
+            <?= badge($regStatus, status_tone($regStatus)) ?>
+        </div>
+
+        <div class="form-grid" style="gap:14px;">
+            <div class="panel" style="padding:14px; background:#f8fafc;">
+                <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Medical Record Number (MRN)</span>
+                <?php if ($mrn !== ''): ?>
+                    <strong style="font-size:16px; color:var(--teal-800); font-family:monospace;"><?= e($mrn) ?></strong>
+                <?php else: ?>
+                    <strong style="font-size:14px; color:var(--gray-400);">Not Issued (Provisional)</strong>
+                <?php endif; ?>
+            </div>
+            <div class="panel" style="padding:14px; background:#f8fafc;">
+                <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Birthdate &amp; Age</span>
+                <strong style="font-size:14px; color:var(--navy-900);"><?= e($dob) ?></strong>
+                <span style="font-size:13px; color:var(--gray-600);"> (<?= e($age) ?>)</span>
+            </div>
+            <div class="panel" style="padding:14px; background:#f8fafc;">
+                <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Sex</span>
+                <strong style="font-size:14px; color:var(--navy-900);"><?= e($sex) ?></strong>
+            </div>
+            <div class="panel" style="padding:14px; background:#f8fafc;">
+                <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Mobile Number</span>
+                <strong style="font-size:14px; color:var(--navy-900); font-family:monospace;"><?= e($phone) ?></strong>
+                <?= $phVer && !$isProv ? badge('OTP Verified', 'success') : badge('Unverified', 'warning') ?>
+            </div>
+        </div>
+
+        <div class="panel" style="padding:14px; background:#f8fafc; margin-top:14px;">
+            <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Residential Address</span>
+            <strong style="font-size:14px; color:var(--navy-900);"><?= e($isProv ? 'Not yet collected (Provisional)' : $addr) ?></strong>
+        </div>
+
+        <div class="panel" style="padding:14px; background:#f8fafc; margin-top:14px;">
+            <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block; margin-bottom:6px;">Verification &amp; Audit Trail</span>
+            <p style="margin:0; font-size:13px; color:var(--gray-700); line-height:1.6;">
+                <strong>Created by:</strong> <?= e($createdBy) ?> on <?= e($createdAt) ?><br>
+                <?php if ($upgAt !== ''): ?>
+                    <strong>Upgraded to Registered by:</strong> <?= e($upgBy ?: 'Staff') ?> on <?= e($upgAt) ?><br>
+                <?php endif; ?>
+                <strong>ID Checked:</strong> <?= $idChecked || !$isProv ? '✓ Yes' : 'Pending' ?> ·
+                <strong>Patient Consent:</strong> <?= $consent || !$isProv ? '✓ Signed' : 'Pending' ?>
+            </p>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head">
+            <div>
+                <h2>Scheduled Appointments (<?= count($ptAppts) ?>)</h2>
+                <p>Visits attached to this patient record</p>
+            </div>
+        </div>
+        <?php if ($ptAppts): ?>
+            <div style="display:flex; flex-direction:column; gap:10px;">
+                <?php foreach ($ptAppts as $a): ?>
+                    <div class="panel" style="padding:14px; background:#f8fafc; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                        <div>
+                            <strong><?= e((string) $a[7]) ?> at <?= e(slot_label(normalize_slot((string) $a[0]))) ?></strong>
+                            <p style="margin:2px 0 0; font-size:13px; color:var(--gray-600);"><?= e((string) $a[5]) ?> (<?= e((string) $a[6]) ?>) · <?= e((string) $a[4]) ?></p>
+                        </div>
+                        <?= badge((string) $a[3], status_tone((string) $a[3])) ?>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php else: ?>
+            <?= filtered_empty('No appointments scheduled yet.') ?>
+        <?php endif; ?>
+    </section>
 </div>

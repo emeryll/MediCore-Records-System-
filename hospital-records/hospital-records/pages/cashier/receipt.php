@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 $orNo      = trim((string) ($_GET['or'] ?? ''));
 $autoPrint = isset($_GET['print']);
 
@@ -15,7 +17,7 @@ if ($retPage === 'receipt' || $retPage === '') {
     $retPage = ($role === 'Admin') ? 'sales-records' : (($role === 'Patient') ? 'bills' : 'payment-history');
 }
 $backUrl   = url(['page' => $retPage]);
-$backLabel = $retPage === 'sales-records' ? '← Back to sales records' : ($retPage === 'bills' ? '← Back to bills' : '← Back to payment history');
+$backLabel = $retPage === 'sales-records' ? '← Back to reports' : ($retPage === 'bills' ? '← Back to bills' : '← Back to payment history');
 
 if ($payment === null): ?>
     <a class="back-link" href="<?= e($backUrl) ?>"><?= e($backLabel) ?></a>
@@ -23,14 +25,14 @@ if ($payment === null): ?>
 <?php return; endif;
 
 $ptRec   = find_patient_record($state, (string) ($payment['patient_name'] ?? ''));
-$ptId    = $ptRec[8] ?? 'P-1001';
+$mrnStr  = $ptRec ? patient_mrn_display($ptRec) : ($ptRec[8] ?? 'MRN-1001');
 $ptHin   = $ptRec[3] ?? '—';
 $items   = (!empty($payment['items']) && is_array($payment['items']))
     ? $payment['items']
     : default_bill_items(parse_money($payment['amount_paid'] ?? 0));
 
 $actions = '<div class="button-pair">'
-    . button($retPage === 'sales-records' ? 'Back to Sales' : 'Back to History', ['variant' => 'secondary', 'href' => $backUrl])
+    . button('Back', ['variant' => 'secondary', 'href' => $backUrl])
     . '<button type="button" class="btn btn-primary" onclick="window.print()">' . icon('printer', 17) . '<span>Print Receipt</span></button>'
     . '</div>';
 ?>
@@ -47,7 +49,7 @@ $actions = '<div class="button-pair">'
         <div>
             <?= logo() ?>
             <p style="font-size:11px; color:var(--gray-500); margin-top:6px;">
-                1450 Harbor Avenue, San Francisco, CA 94107 · Official Hospital Payment Receipt
+                <?= e(APP_ADDRESS) ?> · Tel: <?= e(APP_PHONE) ?> · Official Hospital Payment Receipt
             </p>
         </div>
         <div style="text-align:right;">
@@ -66,8 +68,8 @@ $actions = '<div class="button-pair">'
             <span>Received From (Patient)</span>
             <strong><?= e($payment['patient_name'] ?? '—') ?></strong>
             <p>
-                Patient ID: <code><?= e($ptId) ?></code><br>
-                Insurance: <?= e($ptHin) ?>
+                MRN: <code><?= e($mrnStr ?: '—') ?></code><br>
+                PhilHealth / HMO: <?= e($ptHin) ?>
             </p>
         </div>
         <div>
@@ -80,7 +82,7 @@ $actions = '<div class="button-pair">'
         </div>
         <div>
             <span>Hospital &amp; Cashier</span>
-            <strong><?= e(APP_NAME) ?> Health Hospital</strong>
+            <strong><?= e(APP_FACILITY) ?></strong>
             <p>
                 Cashier: <b><?= e($payment['cashier_name'] ?? current_user_name($role)) ?></b><br>
                 Status: Paid / Verified
@@ -102,8 +104,8 @@ $actions = '<div class="button-pair">'
                 <tr>
                     <td><?= e((string) ($line[0] ?? 'Hospital service')) ?></td>
                     <td style="text-align:center;"><?= e((string) ($line[1] ?? '1')) ?></td>
-                    <td style="text-align:right;"><?= e((string) ($line[2] ?? '$0.00')) ?></td>
-                    <td style="text-align:right;"><strong><?= e((string) ($line[3] ?? '$0.00')) ?></strong></td>
+                    <td style="text-align:right;"><?= e(format_money(parse_money((string) ($line[2] ?? '0')))) ?></td>
+                    <td style="text-align:right;"><strong><?= e(format_money(parse_money((string) ($line[3] ?? '0')))) ?></strong></td>
                 </tr>
             <?php endforeach; ?>
         </tbody>
@@ -126,8 +128,8 @@ $actions = '<div class="button-pair">'
 
     <div style="margin-top:28px; padding-top:18px; border-top:1px dashed var(--gray-200); display:flex; justify-content:space-between; align-items:end; font-size:11px; color:var(--gray-500);">
         <div>
-            Thank you for choosing <strong><?= e(APP_NAME) ?> Health</strong>.<br>
-            Keep this official receipt for your medical and insurance records.
+            Thank you for choosing <strong><?= e(APP_FACILITY) ?></strong>.<br>
+            Keep this official receipt for your medical, PhilHealth, and HMO records.
         </div>
         <div style="text-align:right;">
             <div style="border-top:1px solid var(--gray-400); padding-top:5px; min-width:180px; color:var(--navy-900); font-weight:600;">
@@ -137,11 +139,3 @@ $actions = '<div class="button-pair">'
         </div>
     </div>
 </div>
-
-<?php if ($autoPrint): ?>
-<script>
-window.addEventListener('load', function () {
-    window.print();
-});
-</script>
-<?php endif; ?>
