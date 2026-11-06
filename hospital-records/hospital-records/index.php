@@ -291,6 +291,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $identifier = trim((string) ($_POST['login_identifier'] ?? ($_POST['phone'] ?? ($_POST['email'] ?? ($_POST['username'] ?? '')))));
             $password   = (string) ($_POST['password'] ?? '');
 
+            // Clean any stray PHP error string from browser auto-fill or previous render
+            if (str_contains($identifier, 'Warning') || str_contains($identifier, '<br') || str_contains($identifier, 'Undefined')) {
+                $identifier = '';
+            }
+            if (str_contains($userId, 'Warning') || str_contains($userId, '<br') || str_contains($userId, 'Undefined')) {
+                $userId = '';
+            }
+
             // Log attempt for immediate diagnosis
             @file_put_contents(__DIR__ . '/login_debug.log', date('Y-m-d H:i:s') . " | uid: " . var_export($userId, true) . " | ident: " . var_export($identifier, true) . " | pass: " . var_export($password, true) . "\n", FILE_APPEND);
 
