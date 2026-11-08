@@ -34,6 +34,40 @@ if (($_GET['action'] ?? '') === 'download_csv' && in_array(($_SESSION['role'] ??
     exit;
 }
 
+if (!empty($_GET['cancel_pending_email'])) {
+    unset($_SESSION['pending_profile_email'], $_SESSION['pending_profile_email_otp'], $_SESSION['profile_had_email']);
+    redirect('index.php?page=profile');
+}
+if (!empty($_GET['cancel_pending_phone'])) {
+    unset($_SESSION['pending_profile_phone'], $_SESSION['pending_profile_phone_otp']);
+    redirect('index.php?page=profile');
+}
+
+// Profile Switcher (GET request handler)
+if (!empty($_GET['switch_patient']) && ($_SESSION['role'] ?? '') === 'Patient') {
+    $targetPid  = strtoupper(trim((string) $_GET['switch_patient']));
+    $accountUid = (string) ($_SESSION['user_id'] ?? '');
+    if (db_is_patient_linked($accountUid, $targetPid)) {
+        $pdo = db();
+        $stmt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
+        $stmt->execute([':pid' => $targetPid]);
+        if ($pt = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $swMrn = (string) ($pt['mrn'] ?: $pt['patient_id']);
+            if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $swMrn, $m)) {
+                $swMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            }
+            $_SESSION['active_patient_id']   = (string) $pt['patient_id'];
+            $_SESSION['active_patient_name'] = (string) $pt['full_name'];
+            $_SESSION['active_patient_mrn']  = $swMrn;
+            flash('Switched active profile to ' . $pt['full_name'] . ' (' . $swMrn . ').');
+        }
+    } else {
+        flash('Unauthorized profile selection.');
+    }
+    $page = trim((string) ($_GET['page'] ?? 'home'));
+    redirect('index.php' . ($page !== 'home' ? '?page=' . urlencode($page) : ''));
+}
+
 /* ---------------------------------------------------------------
  * 1. POST actions (login, logout, state changes) -> redirect (PRG)
  * ------------------------------------------------------------- */
@@ -88,99 +122,200 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     switch ($action) {
         /* -------------------------------------------------------
-         * PATIENT 3-STEP ACCOUNT ACTIVATION (Section 3.2)
+         * PATIENT 3-STEP ACCOUNT ACTIVATION & LINKING
          * ----------------------------------------------------- */
         case 'activate_step1':
             $phone      = trim((string) ($_POST['phone'] ?? ''));
             $cleanPhone = preg_replace('/[^0-9]/', '', $phone);
             if (strlen($cleanPhone) < 10) {
-                $_SESSION['activate_error'] = 'Please enter a valid 11-digit mobile number (09XXXXXXXXX).';
+                $err = 'Please enter a valid 11-digit mobile number (09XXXXXXXXX).';
+                $_SESSION['activate_error'] = $err;
+                $_SESSION['register_error'] = $err;
                 redirect('index.php?auth=activate&step=1');
             }
 
-            // Search for patient by phone in $st['patients'] and DB
-            $matchedPt = null;
-            foreach ($st['patients'] as $pt) {
-                $ptPh = preg_replace('/[^0-9]/', '', (string) ($pt[2] ?? ''));
-                if ($ptPh !== '' && ($ptPh === $cleanPhone || substr($ptPh, -10) === substr($cleanPhone, -10))) {
-                    $matchedPt = $pt;
-                    break;
+            // Find all registered patients matching this mobile number
+            $matchedPts = db_get_registered_patients_by_phone($cleanPhone);
+
+            if (empty($matchedPts)) {
+                $pdo  = db();
+                $stmt = $pdo->prepare('SELECT * FROM patients WHERE (phone = :ph OR phone LIKE :p10) AND status != "Archived" LIMIT 1');
+                $stmt->execute([':ph' => $cleanPhone, ':p10' => '%' . substr($cleanPhone, -10)]);
+                $anyPt = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($anyPt) {
+                    if (is_provisional_patient($anyPt)) {
+                        $err = 'Your record (' . $anyPt['full_name'] . ') is currently Provisional (phone-in booking). Please complete full registration in person at the Front Desk to receive your MRN before activating your online portal account.';
+                    } elseif (!empty($anyPt['no_phone'])) {
+                        $err = 'This patient record was registered without a verified personal mobile number and does not have an online portal account. Please visit the Front Desk if you wish to verify your mobile number and enable portal access.';
+                    } else {
+                        $err = 'Patient record found, but registration is still pending verification by Front Desk Staff.';
+                    }
+                } else {
+                    $err = 'No hospital record found for ' . $cleanPhone . '. Please register with Front Desk Staff at West Metro Medical Center first.';
                 }
-            }
-
-            if (!$matchedPt) {
-                $_SESSION['activate_error'] = 'No hospital record found for ' . $cleanPhone . '. Please register with Front Desk Staff at West Metro Medical Center first.';
+                $_SESSION['activate_error'] = $err;
+                $_SESSION['register_error'] = $err;
                 redirect('index.php?auth=activate&step=1');
             }
 
-            if (is_provisional_patient($matchedPt)) {
-                $_SESSION['activate_error'] = 'Your record (' . $matchedPt[0] . ') is currently Provisional (phone-in booking). Please complete full registration in person at the Front Desk upon arrival to receive your MRN before activating your online portal account.';
-                redirect('index.php?auth=activate&step=1');
-            }
-
-            $mrn  = patient_mrn_display($matchedPt) ?: (string) ($matchedPt[8] ?? 'MRN-1001');
-            $ptId = (string) ($matchedPt[8] ?? $mrn);
-
-            // Check if already activated
+            // Check if an account already exists for this phone number (Rule: 1 phone = 1 account)
             $existingAcc = db_find_account_by_phone($cleanPhone);
             if ($existingAcc && ($existingAcc['role'] ?? '') === 'Patient') {
-                $_SESSION['activate_error'] = 'An online portal account is already active for ' . $matchedPt[0] . ' (' . $mrn . '). Please log in with your mobile number and password.';
-                redirect('index.php?auth=activate&step=1');
+                $unlinked = db_get_unlinked_patients_by_phone($cleanPhone, (string) $existingAcc['user_id']);
+                if (empty($unlinked)) {
+                    $err = 'An online portal account is already active for this mobile number and all profiles are linked. Please log in with your password.';
+                    $_SESSION['activate_error'] = $err;
+                    $_SESSION['register_error'] = $err;
+                    redirect('index.php?auth=login');
+                }
+                $_SESSION['activate_has_existing_account']  = true;
+                $_SESSION['activate_existing_account_uid']  = (string) $existingAcc['user_id'];
+                $_SESSION['activate_existing_account_name'] = (string) $existingAcc['full_name'];
+                $_SESSION['activate_unlinked_patients']     = $unlinked;
+            } else {
+                $_SESSION['activate_has_existing_account']  = false;
+                unset($_SESSION['activate_existing_account_uid'], $_SESSION['activate_existing_account_name']);
+                $_SESSION['activate_unlinked_patients']     = $matchedPts;
             }
+
+            $primaryPt = $matchedPts[0];
+            $mrn  = (string) ($primaryPt['mrn'] ?: $primaryPt['patient_id']);
+            $ptId = (string) $primaryPt['patient_id'];
 
             $otpRes = db_generate_phone_otp($cleanPhone, $ptId, 'account_creation');
             $code   = $otpRes['code'] ?? '123456';
 
             $_SESSION['activate_phone'] = $cleanPhone;
             $_SESSION['activate_otp']   = $code;
-            $_SESSION['activate_pt']    = [
-                'patient_id' => $ptId,
-                'mrn'        => $mrn,
-                'full_name'  => (string) $matchedPt[0],
-                'birthdate'  => (string) ($matchedPt[1] ?? ''),
-                'sex'        => (string) ($matchedPt[5] ?? 'Not specified'),
-                'address'    => (string) ($matchedPt[7] ?? ''),
-                'email'      => (string) ($matchedPt['email'] ?? ''),
-            ];
-            push_sim_message('sms', $cleanPhone, 'West Metro Medical Center Account Activation', 'Your 6-digit OTP code to activate your Patient Portal account (' . $mrn . ') is ' . $code . '.', ['Code' => $code]);
+            $_SESSION['activate_step']  = 2;
+            $_SESSION['act_phone']      = $cleanPhone;
+            $_SESSION['act_otp_code']   = $code;
+            $_SESSION['act_mrn']        = $mrn;
+            $_SESSION['act_name']       = (string) $primaryPt['full_name'];
+            $_SESSION['act_step']       = 2;
+            $_SESSION['activate_pts']   = $matchedPts;
+
+            push_sim_message('sms', $cleanPhone, 'West Metro Medical Center Account Verification', 'Your 6-digit OTP code to verify your mobile number is ' . $code . '.', ['Code' => $code]);
             redirect('index.php?auth=activate&step=2');
 
         case 'activate_step2':
             $code  = trim((string) ($_POST['otp_code'] ?? ''));
-            $phone = (string) ($_SESSION['activate_phone'] ?? '');
-            if ($phone === '' || empty($_SESSION['activate_pt'])) {
+            $phone = (string) ($_SESSION['activate_phone'] ?? ($_SESSION['act_phone'] ?? ''));
+            if ($phone === '' || empty($_SESSION['activate_pts'])) {
                 redirect('index.php?auth=activate&step=1');
             }
             $vRes = db_verify_phone_otp($phone, $code, 'account_creation');
-            if (empty($vRes['ok']) && $code !== (string) ($_SESSION['activate_otp'] ?? '')) {
-                $_SESSION['activate_error'] = $vRes['error'] ?? 'Invalid or expired 6-digit OTP code.';
+            if (empty($vRes['ok']) && $code !== (string) ($_SESSION['activate_otp'] ?? ($_SESSION['act_otp_code'] ?? ''))) {
+                $err = $vRes['error'] ?? 'Invalid or expired 6-digit OTP code.';
+                $_SESSION['activate_error'] = $err;
+                $_SESSION['register_error'] = $err;
                 redirect('index.php?auth=activate&step=2');
             }
             $_SESSION['activate_verified'] = true;
+            $_SESSION['activate_step']     = 3;
+            $_SESSION['act_step']          = 3;
             redirect('index.php?auth=activate&step=3');
 
-        case 'activate_step3':
-            if (empty($_SESSION['activate_verified']) || empty($_SESSION['activate_pt'])) {
+        case 'activate_link_existing':
+            // Case 2: An account already exists for this phone number. Link unlinked profile via birthdate (NO password)
+            if (empty($_SESSION['activate_verified']) || empty($_SESSION['activate_phone']) || empty($_SESSION['activate_has_existing_account'])) {
                 redirect('index.php?auth=activate&step=1');
             }
-            $ptInfo   = $_SESSION['activate_pt'];
-            $phone    = (string) ($_SESSION['activate_phone'] ?? '');
-            $email    = trim((string) ($_POST['email'] ?? ($ptInfo['email'] ?? '')));
-            $password = (string) ($_POST['password'] ?? '');
-            $confirm  = (string) ($_POST['confirm_password'] ?? '');
+            $existingUid = (string) ($_SESSION['activate_existing_account_uid'] ?? '');
+            $targetPid   = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
+            $inputBdate  = trim((string) ($_POST['birthdate'] ?? ''));
+
+            $attemptKey = 'act_link_attempts_' . md5($targetPid);
+            $attempts   = (int) ($_SESSION[$attemptKey] ?? 0);
+            if ($attempts >= 3) {
+                $err = 'Maximum birthdate verification attempts exceeded for this profile. Please contact the Front Desk.';
+                $_SESSION['activate_error'] = $err;
+                $_SESSION['register_error'] = $err;
+                redirect('index.php?auth=activate&step=3');
+            }
+
+            $pdo  = db();
+            $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
+            $stmt->execute([':pid' => $targetPid]);
+            $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$pt || !match_birthdates($inputBdate, (string) ($pt['birthdate'] ?? ''))) {
+                $_SESSION[$attemptKey] = $attempts + 1;
+                $rem = 3 - ($attempts + 1);
+                $warn = $rem > 0 ? " ({$rem} attempt(s) remaining)" : ' (Maximum attempts reached)';
+                $err  = 'The birthdate provided does not match our records for this profile.' . $warn;
+                $_SESSION['activate_error'] = $err;
+                $_SESSION['register_error'] = $err;
+                redirect('index.php?auth=activate&step=3');
+            }
+
+            // Birthdate matched: link patient to existing account
+            db_link_patient_to_account($existingUid, $pt['patient_id'], 'Dependent', false, 'Activation Link Self-Service');
+            $logAudit('Linked patient profile', 'patient_account_links', '#' . $pt['patient_id']);
+            unset(
+                $_SESSION[$attemptKey],
+                $_SESSION['activate_phone'], $_SESSION['activate_otp'], $_SESSION['activate_pts'], $_SESSION['activate_verified'],
+                $_SESSION['activate_has_existing_account'], $_SESSION['activate_unlinked_patients'],
+                $_SESSION['act_phone'], $_SESSION['act_otp_code'], $_SESSION['act_mrn'], $_SESSION['act_name'], $_SESSION['act_step'],
+                $_SESSION['activate_error'], $_SESSION['register_error']
+            );
+
+            flash('Success! Profile for ' . $pt['full_name'] . ' (' . ($pt['mrn'] ?: $pt['patient_id']) . ') has been linked to your existing account. Please sign in with your password.');
+            redirect('index.php?auth=login');
+
+        case 'activate_step3':
+            // Case 1: No account exists for this phone yet
+            if (empty($_SESSION['activate_verified']) || empty($_SESSION['activate_phone'])) {
+                redirect('index.php?auth=activate&step=1');
+            }
+            if (!empty($_SESSION['activate_has_existing_account'])) {
+                redirect('index.php?auth=activate&step=3');
+            }
+
+            $allPts      = $_SESSION['activate_pts'] ?? [];
+            $phone       = (string) ($_SESSION['activate_phone'] ?? '');
+            $password    = (string) ($_POST['password'] ?? '');
+            $confirm     = (string) ($_POST['confirm_password'] ?? '');
+            $bdateInputs = $_POST['birthdates'] ?? [];
 
             if ($password !== $confirm) {
                 $_SESSION['activate_error'] = 'Passwords do not match.';
+                $_SESSION['register_error'] = 'Passwords do not match.';
                 redirect('index.php?auth=activate&step=3');
             }
             if (strlen($password) < 8) {
                 $_SESSION['activate_error'] = 'Password must be at least 8 characters long.';
+                $_SESSION['register_error'] = 'Password must be at least 8 characters long.';
                 redirect('index.php?auth=activate&step=3');
             }
 
-            $userId   = (string) ($ptInfo['patient_id'] ?: $ptInfo['mrn']);
-            $fullName = (string) $ptInfo['full_name'];
-            $finalEm  = $email !== '' ? $email : (strtolower(preg_replace('/[^a-zA-Z0-9]/', '', $userId)) . '@patient.westmetro.local');
+            // Verify birthdate for each patient being linked
+            $confirmedPts = [];
+            foreach ($allPts as $p) {
+                $pId = (string) $p['patient_id'];
+                $givenBdate = trim((string) ($bdateInputs[$pId] ?? ''));
+                if ($givenBdate !== '' && match_birthdates($givenBdate, (string) ($p['birthdate'] ?? ''))) {
+                    $confirmedPts[] = $p;
+                }
+            }
+
+            if (empty($confirmedPts)) {
+                $_SESSION['activate_error'] = 'The birthdate entered does not match the patient\'s record. Please verify and try again.';
+                $_SESSION['register_error'] = $_SESSION['activate_error'];
+                redirect('index.php?auth=activate&step=3');
+            }
+
+            $primaryPt = $confirmedPts[0];
+            $userId   = (string) ($primaryPt['patient_id'] ?: $primaryPt['mrn']);
+            if (str_starts_with($userId, 'MRN-')) {
+                $userId = 'P-' . substr($userId, 4);
+            }
+            if (!preg_match('/^P-?[A-Z0-9]+$/i', $userId)) {
+                $userId = db_next_user_id('P');
+            }
+            $fullName = (string) $primaryPt['full_name'];
+            $email    = trim((string) ($_POST['email'] ?? ($primaryPt['email'] ?? '')));
+            $finalEm  = $email !== '' ? $email : null;
 
             $res = db_create_account([
                 'user_id'        => $userId,
@@ -189,26 +324,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'password'       => $password,
                 'full_name'      => $fullName,
                 'role'           => 'Patient',
-                'birthdate'      => (string) ($ptInfo['birthdate'] ?? ''),
+                'birthdate'      => (string) ($primaryPt['birthdate'] ?? ''),
                 'phone'          => $phone,
                 'phone_verified' => 1,
-                'sex'            => (string) ($ptInfo['sex'] ?? 'Not specified'),
-                'address'        => (string) ($ptInfo['address'] ?? ''),
+                'sex'            => (string) ($primaryPt['sex'] ?? 'Not specified'),
+                'address'        => (string) ($primaryPt['address'] ?? ''),
             ], true);
 
             if (isset($res['error'])) {
                 $_SESSION['activate_error'] = $res['error'];
+                $_SESSION['register_error'] = $res['error'];
                 redirect('index.php?auth=activate&step=3');
             }
 
-            unset($_SESSION['activate_phone'], $_SESSION['activate_otp'], $_SESSION['activate_pt'], $_SESSION['activate_verified']);
+            // Link all confirmed patients to this new account
+            foreach ($confirmedPts as $idx => $cPt) {
+                $isPrim = ($idx === 0);
+                $rel    = $isPrim ? 'Me' : 'Dependent';
+                db_link_patient_to_account($userId, (string) $cPt['patient_id'], $rel, $isPrim, 'Initial Account Activation');
+                $logAudit('Linked patient profile', 'patient_account_links', '#' . $cPt['patient_id']);
+            }
+
+            unset(
+                $_SESSION['activate_phone'], $_SESSION['activate_otp'], $_SESSION['activate_pts'], $_SESSION['activate_verified'], $_SESSION['activate_step'],
+                $_SESSION['act_phone'], $_SESSION['act_otp_code'], $_SESSION['act_mrn'], $_SESSION['act_name'], $_SESSION['act_step'],
+                $_SESSION['activate_error'], $_SESSION['register_error'], $_SESSION['activate_has_existing_account'], $_SESSION['activate_unlinked_patients']
+            );
+
             $st = db_load_state();
-            $_SESSION['state']     = &$st;
-            $_SESSION['role']      = 'Patient';
-            $_SESSION['user_id']   = $userId;
-            $_SESSION['user_name'] = $fullName;
+            $_SESSION['state']               = &$st;
+            $_SESSION['role']                = 'Patient';
+            $_SESSION['user_id']             = $userId;
+            $_SESSION['user_name']           = $fullName;
+            $_SESSION['active_patient_id']   = (string) $primaryPt['patient_id'];
+            $_SESSION['active_patient_mrn']  = (string) ($primaryPt['mrn'] ?: $primaryPt['patient_id']);
+            $_SESSION['active_patient_name'] = $fullName;
+
             $logAudit('Activated account', 'accounts', '#' . $userId);
-            flash('Welcome to West Metro Medical Center, ' . $fullName . '! Your Patient Portal account (' . ($ptInfo['mrn'] ?? $userId) . ') is now active.');
+            flash('Welcome to West Metro Medical Center, ' . $fullName . '! Your Patient Portal account (' . ($_SESSION['active_patient_mrn']) . ') is now active.');
             redirect('index.php');
 
         /* -------------------------------------------------------
@@ -301,8 +454,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect('index.php?auth=login');
             }
 
-            // Check if account requires first-login password change
-            if (!empty($acc['force_password_change'])) {
+            // Check if account requires first-login password change (never for Admin)
+            if (!empty($acc['force_password_change']) && ($acc['role'] ?? '') !== 'Admin') {
                 $_SESSION['force_pw_change_uid'] = (string) $acc['user_id'];
                 redirect('index.php?auth=login&set_password=1&uid=' . urlencode((string) $acc['user_id']));
             }
@@ -313,7 +466,116 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ? 'Dr. ' . $acc['full_name']
                 : (string) $acc['full_name'];
 
+            if ($acc['role'] === 'Patient') {
+                $linked = db_get_account_linked_patients((string) $acc['user_id']);
+                if (!empty($linked)) {
+                    $_SESSION['active_patient_id']   = (string) $linked[0]['patient_id'];
+                    $_SESSION['active_patient_name'] = (string) $linked[0]['patient_name'];
+                    $actMrn = (string) ($linked[0]['mrn'] ?: $linked[0]['patient_id']);
+                    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $actMrn, $m)) {
+                        $actMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                    }
+                    $_SESSION['active_patient_mrn']  = $actMrn;
+                } else {
+                    $actMrn = (string) $acc['user_id'];
+                    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $actMrn, $m)) {
+                        $actMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                    }
+                    $_SESSION['active_patient_id']   = (string) $acc['user_id'];
+                    $_SESSION['active_patient_name'] = (string) $acc['full_name'];
+                    $_SESSION['active_patient_mrn']  = $actMrn;
+                }
+            }
+
             $logAudit('Sign in', 'accounts', '#' . $acc['user_id']);
+            redirect('index.php');
+
+        case 'switch_patient_profile':
+            $targetPid  = strtoupper(trim((string) ($_POST['target_patient_id'] ?? ($_GET['switch_patient'] ?? ''))));
+            $accountUid = (string) ($_SESSION['user_id'] ?? '');
+            $role       = (string) ($_SESSION['role'] ?? '');
+
+            if ($role !== 'Patient' || $accountUid === '' || $targetPid === '') {
+                redirect('index.php');
+            }
+
+            // CRITICAL: Always check that target patient is actively linked to the logged-in account
+            if (!db_is_patient_linked($accountUid, $targetPid)) {
+                flash('Unauthorized profile selection.');
+                redirect('index.php');
+            }
+
+            $pdo = db();
+            $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
+            $stmt->execute([':pid' => $targetPid]);
+            if ($pt = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $_SESSION['active_patient_id']   = (string) $pt['patient_id'];
+                $_SESSION['active_patient_name'] = (string) $pt['full_name'];
+                $_SESSION['active_patient_mrn']  = (string) ($pt['mrn'] ?: $pt['patient_id']);
+                flash('Switched active profile to ' . $pt['full_name'] . ' (' . ($_SESSION['active_patient_mrn']) . ').');
+            }
+            $returnTo = (string) ($_POST['return_url'] ?? 'index.php');
+            redirect($returnTo ?: 'index.php');
+
+        case 'link_patient_profile':
+            // Logged-in patient linking an unlinked patient sharing their mobile number
+            $accountUid = (string) ($_SESSION['user_id'] ?? '');
+            $role       = (string) ($_SESSION['role'] ?? '');
+            $patientId  = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
+            $bdate      = trim((string) ($_POST['birthdate'] ?? ''));
+
+            if ($role !== 'Patient' || $accountUid === '' || $patientId === '') {
+                redirect('index.php');
+            }
+
+            // Enforce maximum 3 attempts
+            $attemptKey = 'link_attempts_' . md5($patientId);
+            $attempts   = (int) ($_SESSION[$attemptKey] ?? 0);
+            if ($attempts >= 3) {
+                flash('Maximum birthdate verification attempts exceeded for this profile. Please contact the Front Desk.');
+                redirect('index.php');
+            }
+
+            $pdo = db();
+            $acc = db_find_account_by_id($accountUid);
+            $accPhone = preg_replace('/[^0-9]/', '', (string) ($acc['phone'] ?? ''));
+
+            $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
+            $stmt->execute([':pid' => $patientId]);
+            $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$pt) {
+                $_SESSION[$attemptKey] = $attempts + 1;
+                flash('Patient record not found.');
+                redirect('index.php');
+            }
+
+            $ptPhone = preg_replace('/[^0-9]/', '', (string) ($pt['phone'] ?? ''));
+            // Verify patient has matching phone, is Registered, and not no_phone
+            if ($accPhone === '' || (substr($accPhone, -10) !== substr($ptPhone, -10)) || !empty($pt['no_phone']) || ($pt['registration_status'] ?? '') !== 'Registered') {
+                $_SESSION[$attemptKey] = $attempts + 1;
+                flash('This patient record cannot be linked.');
+                redirect('index.php');
+            }
+
+            // Verify birthdate
+            if (!match_birthdates($bdate, (string) ($pt['birthdate'] ?? ''))) {
+                $_SESSION[$attemptKey] = $attempts + 1;
+                $rem = 3 - ($attempts + 1);
+                $warn = $rem > 0 ? " ({$rem} attempt(s) remaining)" : ' (Maximum attempts reached)';
+                flash('The birthdate provided does not match our records for this profile.' . $warn);
+                redirect('index.php');
+            }
+
+            // Success: link patient
+            $linkMrn = (string) ($pt['mrn'] ?: $pt['patient_id']);
+            if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $linkMrn, $m)) {
+                $linkMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            }
+            db_link_patient_to_account($accountUid, $pt['patient_id'], 'Dependent', false, 'Patient Portal Self-Link');
+            unset($_SESSION[$attemptKey]);
+            $logAudit('Linked patient profile', 'patient_account_links', '#' . $pt['patient_id']);
+            flash('Success! Profile for ' . $pt['full_name'] . ' (' . $linkMrn . ') has been added to your account.');
             redirect('index.php');
 
         case 'forgot':
@@ -340,8 +602,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $otpRes = db_generate_phone_otp($email, (string) $acc['user_id'], 'password_reset');
                 $code   = $otpRes['code'] ?? '123456';
-                $_SESSION['reset_info']           = 'A 6-digit verification code has been sent to ' . $email . '.';
-                $_SESSION['reset_sms_sim']        = '✉️ Simulated Email to ' . $email . ': Your West Metro Medical Center password reset code is ' . $code . '.';
+                $_SESSION['reset_info']           = 'A 6-digit verification code has been sent to ' . $email . '. Please check your inbox.';
+                send_password_reset_email($email, (string) ($acc['name'] ?? 'User'), $code);
                 $_SESSION['reset_otp_code']       = $code;
                 $_SESSION['reset_verified_phone'] = $email;
                 $_SESSION['reset_target_uid']     = (string) $acc['user_id'];
@@ -396,7 +658,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('index.php?auth=login');
 
         case 'logout':
-            unset($_SESSION['role'], $_SESSION['user_id'], $_SESSION['user_name']);
+            unset(
+                $_SESSION['role'], $_SESSION['user_id'], $_SESSION['user_name'],
+                $_SESSION['active_patient_id'], $_SESSION['active_patient_name'], $_SESSION['active_patient_mrn']
+            );
             header('Location: index.php');
             exit;
 
@@ -455,13 +720,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('Please enter a valid email address.');
                 redirect('index.php?page=profile');
             }
+
+            // Check if this email is already registered to another account
+            $pdo = db();
+            $chk = $pdo->prepare('SELECT id, user_id FROM accounts WHERE LOWER(email) = :em AND UPPER(user_id) != :uid LIMIT 1');
+            $chk->execute([':em' => $newEmail, ':uid' => strtoupper($currentUid)]);
+            if ($chk->fetch()) {
+                flash('This email address is already registered to another account. Please choose a different email.');
+                redirect('index.php?page=profile');
+            }
+
+            $currAcc = db_find_account_by_id($currentUid);
+            $currEm  = (string) ($currAcc['email'] ?? '');
+            $hasExisting = ($currEm !== '' && !str_ends_with($currEm, '@medicore.local') && !str_ends_with($currEm, '@patient.westmetro.local'));
+            $_SESSION['profile_had_email'] = $hasExisting;
+
             $otpRes = db_generate_phone_otp($newEmail, $currentUid, 'profile_email_change');
             $code   = $otpRes['code'] ?? '123456';
             $_SESSION['pending_profile_email']     = $newEmail;
             $_SESSION['pending_profile_email_otp'] = $code;
-            push_sim_message('email', $newEmail, 'Confirm New Email Address', 'Your 6-digit verification code to confirm updating your email address is ' . $code . '.', ['Code' => $code]);
-            flash('Verification code sent to ' . $newEmail . '. Enter the code to confirm your new email.');
-            redirect('index.php?page=profile');
+
+            $sent = send_email_verification_code($newEmail, current_user_name(), $code, !$hasExisting);
+            if ($sent) {
+                flash('A 6-digit confirmation code was sent to ' . $newEmail . '. Please enter the code below to verify ownership.');
+            } else {
+                flash('A 6-digit verification code was generated for ' . $newEmail . '. Please enter the code to confirm email ownership.');
+            }
+            redirect('index.php?page=profile&flow=verify_email');
 
         case 'confirm_profile_email':
             $code       = trim((string) ($_POST['email_otp_code'] ?? ''));
@@ -472,15 +757,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $vRes = db_verify_phone_otp($newEmail, $code, 'profile_email_change');
             if (empty($vRes['ok']) && $code !== (string) ($_SESSION['pending_profile_email_otp'] ?? '')) {
-                flash('Invalid verification code. Email address was not changed.');
-                redirect('index.php?page=profile');
+                flash('Invalid or expired verification code. Email address was not saved.');
+                redirect('index.php?page=profile&flow=verify_email');
             }
             $pdo = db();
             $pdo->prepare('UPDATE accounts SET email = :em WHERE UPPER(user_id) = :uid')->execute([':em' => $newEmail, ':uid' => strtoupper($currentUid)]);
             $pdo->prepare('UPDATE patients SET email = :em WHERE UPPER(patient_id) = :uid')->execute([':em' => $newEmail, ':uid' => strtoupper($currentUid)]);
-            unset($_SESSION['pending_profile_email'], $_SESSION['pending_profile_email_otp']);
-            $logAudit('Verified new email', 'accounts', '#' . $currentUid);
-            flash('Email address verified and updated to ' . $newEmail . '!');
+
+            if (isset($st['patients']) && is_array($st['patients'])) {
+                foreach ($st['patients'] as &$pt) {
+                    if (strcasecmp((string) ($pt[8] ?? ''), $currentUid) === 0 || strcasecmp($pt[0], current_user_name($role)) === 0) {
+                        $pt['email'] = $newEmail;
+                    }
+                }
+                unset($pt);
+            }
+
+            $actionWord = !empty($_SESSION['profile_had_email']) ? 'updated' : 'added';
+            unset($_SESSION['pending_profile_email'], $_SESSION['pending_profile_email_otp'], $_SESSION['profile_had_email']);
+            $logAudit('Verified email ' . $newEmail, 'accounts', '#' . $currentUid);
+            flash('Success! Email address ' . $newEmail . ' has been verified and ' . $actionWord . ' to your profile.');
             redirect('index.php?page=profile');
 
         case 'change_profile_password':
@@ -582,17 +878,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
          * PROVISIONAL vs REGISTERED PATIENT FLOWS (Sections 2 & 5.2)
          * ----------------------------------------------------- */
         case 'quick_add_provisional':
-            $first  = trim((string) ($_POST['first_name'] ?? ''));
-            $middle = trim((string) ($_POST['middle_name'] ?? ''));
-            $last   = trim((string) ($_POST['last_name'] ?? ''));
-            $bdate  = trim((string) ($_POST['birthdate'] ?? ''));
-            $sex    = trim((string) ($_POST['sex'] ?? 'Not specified'));
-            $phone  = trim((string) ($_POST['phone'] ?? ''));
+            $first    = trim((string) ($_POST['first_name'] ?? ''));
+            $middle   = trim((string) ($_POST['middle_name'] ?? ''));
+            $last     = trim((string) ($_POST['last_name'] ?? ''));
+            $bdate    = trim((string) ($_POST['birthdate'] ?? ''));
+            $sex      = trim((string) ($_POST['sex'] ?? 'Not specified'));
+            $noPhone   = !empty($_POST['no_phone']);
+            $phone     = $noPhone ? '' : trim((string) ($_POST['phone'] ?? ''));
+            $cFirst    = trim((string) ($_POST['contact_first_name'] ?? ''));
+            $cMiddle   = trim((string) ($_POST['contact_middle_name'] ?? ''));
+            $cLast     = trim((string) ($_POST['contact_last_name'] ?? ''));
+            $cRelBase  = trim((string) ($_POST['contact_relationship'] ?? ''));
+            $cRelOther = trim((string) ($_POST['contact_relationship_other'] ?? ''));
+            $cRel      = (strcasecmp($cRelBase, 'Other') === 0 && $cRelOther !== '') ? 'Other (' . $cRelOther . ')' : $cRelBase;
+            $cName     = trim($cFirst . ($cMiddle !== '' ? ' ' . $cMiddle : '') . ' ' . $cLast);
+            if ($cName === '' && !empty($_POST['contact_name'])) {
+                $cName = trim((string) $_POST['contact_name']);
+            }
+            $cPhone    = trim((string) ($_POST['contact_phone'] ?? ''));
 
             $fullName = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
-            if ($fullName === '' || $phone === '') {
-                flash('Please enter the patient name, birthdate, sex, and contact number.');
+            if ($fullName === '' || $bdate === '' || $sex === '' || $sex === 'Not specified') {
+                flash('Please enter the patient name, birthdate, and sex.');
                 redirect($return);
+            }
+            if ($noPhone) {
+                if ($cFirst === '' || $cLast === '' || $cRelBase === '' || (strcasecmp($cRelBase, 'Other') === 0 && $cRelOther === '') || $cPhone === '') {
+                    flash('When patient has no phone number, contact person first name, last name, relationship (with specification if Other), and contact number are required.');
+                    redirect($return);
+                }
+            } else {
+                if ($phone === '') {
+                    flash('Please enter a valid patient mobile number or check "Patient has no phone number".');
+                    redirect($return);
+                }
             }
             $fmtBirth = ($bdate !== '' && strtotime($bdate) !== false) ? date('M d, Y', strtotime($bdate)) : $bdate;
             $provRef  = db_next_provisional_ref();
@@ -600,7 +919,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $row = [
                 $fullName,
                 $fmtBirth,
-                $phone,
+                $noPhone ? '—' : $phone,
                 '—',
                 initials($fullName, 2),
                 $sex,
@@ -610,8 +929,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 '', // Blank MRN for provisional!
                 'Provisional',
                 date('Y-m-d'),
-                'reg_status' => 'Provisional',
-                'mrn'        => '',
+                'registration_status'        => 'Provisional',
+                'reg_status'                 => 'Provisional',
+                'mrn'                        => '',
+                'patient_id'                 => $provRef,
+                'first_name'                 => $first,
+                'middle_name'                => $middle,
+                'last_name'                  => $last,
+                'no_phone'                   => $noPhone ? 1 : 0,
+                'phone_verified'             => 0,
+                'contact_name'               => $cName,
+                'contact_relationship'       => $cRel,
+                'contact_phone'              => $cPhone,
+                'contact_first_name'         => $cFirst,
+                'contact_middle_name'        => $cMiddle,
+                'contact_last_name'          => $cLast,
+                'contact_relationship_base'  => $cRelBase,
+                'contact_relationship_other' => $cRelOther,
             ];
             array_unshift($st['patients'], $row);
             db_save_state($st);
@@ -631,28 +965,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $bdate    = trim((string) ($_POST['birthdate'] ?? ''));
             $sex      = trim((string) ($_POST['sex'] ?? 'Not specified'));
             $blood    = trim((string) ($_POST['blood_type'] ?? 'Not specified'));
-            $phone    = trim((string) ($_POST['phone'] ?? ''));
-            $email    = trim((string) ($_POST['email'] ?? ''));
-            $hin      = trim((string) ($_POST['hin'] ?? '—')) ?: '—';
-            $country  = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
-            $province = trim((string) ($_POST['province'] ?? 'Zamboanga del Sur'));
-            $city     = trim((string) ($_POST['city'] ?? 'Zamboanga City'));
-            $barangay = trim((string) ($_POST['barangay'] ?? ''));
-            $street   = trim((string) ($_POST['street'] ?? 'N/A'));
-            $postal   = trim((string) ($_POST['postal_code'] ?? '7000'));
+            $noPhone   = !empty($_POST['no_phone']);
+            $phone     = $noPhone ? '' : trim((string) ($_POST['phone'] ?? ''));
+            $cFirst    = trim((string) ($_POST['contact_first_name'] ?? ''));
+            $cMiddle   = trim((string) ($_POST['contact_middle_name'] ?? ''));
+            $cLast     = trim((string) ($_POST['contact_last_name'] ?? ''));
+            $cRelBase  = trim((string) ($_POST['contact_relationship'] ?? ''));
+            $cRelOther = trim((string) ($_POST['contact_relationship_other'] ?? ''));
+            $cRel      = (strcasecmp($cRelBase, 'Other') === 0 && $cRelOther !== '') ? 'Other (' . $cRelOther . ')' : $cRelBase;
+            $cName     = trim($cFirst . ($cMiddle !== '' ? ' ' . $cMiddle : '') . ' ' . $cLast);
+            if ($cName === '' && !empty($_POST['contact_name'])) {
+                $cName = trim((string) $_POST['contact_name']);
+            }
+            $cPhone    = trim((string) ($_POST['contact_phone'] ?? ''));
+            $email     = trim((string) ($_POST['email'] ?? ''));
+            $hin       = trim((string) ($_POST['hin'] ?? '—')) ?: '—';
+            $country   = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province  = trim((string) ($_POST['province'] ?? 'Zamboanga del Sur'));
+            $city      = trim((string) ($_POST['city'] ?? 'Zamboanga City'));
+            $barangay  = trim((string) ($_POST['barangay'] ?? ''));
+            $street    = trim((string) ($_POST['street'] ?? 'N/A'));
+            $postal    = trim((string) ($_POST['postal_code'] ?? '7000'));
 
             $fullName = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
+            if ($fullName === '' || $bdate === '') {
+                flash('Please enter the patient full name and birthdate.');
+                redirect($return);
+            }
+            if ($noPhone) {
+                if ($cFirst === '' || $cLast === '' || $cRelBase === '' || (strcasecmp($cRelBase, 'Other') === 0 && $cRelOther === '') || $cPhone === '') {
+                    flash('When patient has no phone number, contact person first name, last name, relationship (with specification if Other), and contact number are required.');
+                    redirect($return);
+                }
+                $phone = '';
+            } else {
+                if ($phone === '') {
+                    flash('Please enter a valid mobile number or check "Patient has no phone number".');
+                    redirect($return);
+                }
+                if (empty($_POST['phone_verified'])) {
+                    flash('Patient mobile number must be verified via OTP before completing registration.');
+                    redirect($return);
+                }
+            }
+
             $fmtBirth = ($bdate !== '' && strtotime($bdate) !== false) ? date('M d, Y', strtotime($bdate)) : $bdate;
             $addrStr  = implode(', ', array_filter([$street, $barangay, $city, $province, $country, $postal]));
             $mrn      = db_next_mrn();
-            $ptId     = str_replace('MRN-', 'P-', $mrn);
+            if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
+                $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            }
+            $ptId     = $mrn;
 
             foreach ($st['patients'] as $idx => $pt) {
                 if (strcasecmp($pt[0], $origPt) === 0 || strcasecmp($pt[0], $fullName) === 0) {
                     $st['patients'][$idx] = [
                         $fullName,
                         $fmtBirth,
-                        $phone,
+                        $noPhone ? '—' : $phone,
                         $hin,
                         initials($fullName, 2),
                         $sex,
@@ -662,16 +1032,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $mrn,
                         'Registered',
                         $pt[11] ?? date('Y-m-d'),
-                        'country'        => $country,
-                        'province'       => $province,
-                        'city'           => $city,
-                        'barangay'       => $barangay,
-                        'street'         => $street,
-                        'postal_code'    => $postal,
-                        'phone_verified' => 1,
-                        'email'          => $email,
-                        'mrn'            => $mrn,
-                        'reg_status'     => 'Registered',
+                        'country'                    => $country,
+                        'province'                   => $province,
+                        'city'                       => $city,
+                        'barangay'                   => $barangay,
+                        'street'                     => $street,
+                        'postal_code'                => $postal,
+                        'phone_verified'             => $noPhone ? 0 : 1,
+                        'email'                      => $email,
+                        'mrn'                        => $mrn,
+                        'reg_status'                 => 'Registered',
+                        'registration_status'        => 'Registered',
+                        'first_name'                 => $first,
+                        'middle_name'                => $middle,
+                        'last_name'                  => $last,
+                        'no_phone'                   => $noPhone ? 1 : 0,
+                        'contact_name'               => $cName,
+                        'contact_relationship'       => $cRel,
+                        'contact_phone'              => $cPhone,
+                        'contact_first_name'         => $cFirst,
+                        'contact_middle_name'        => $cMiddle,
+                        'contact_last_name'          => $cLast,
+                        'contact_relationship_base'  => $cRelBase,
+                        'contact_relationship_other' => $cRelOther,
+                        'id_checked'                 => 1,
                     ];
                     break;
                 }
@@ -691,15 +1075,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             unset($ap);
 
             db_save_state($st);
-            push_sim_message(
-                'sms',
-                $phone,
-                'West Metro Medical Center — MRN Issued',
-                'Welcome ' . $fullName . '! Your permanent Medical Record Number is ' . $mrn . '. You can now activate your online Patient Portal account.',
-                ['MRN' => $mrn],
-                'index.php?auth=activate&phone=' . urlencode($phone),
-                'Activate Patient Portal Account'
-            );
+            if (!$noPhone && $phone !== '') {
+                push_sim_message(
+                    'sms',
+                    $phone,
+                    'West Metro Medical Center — MRN Issued',
+                    'Welcome ' . $fullName . '! Your permanent Medical Record Number is ' . $mrn . '. You can now activate your online Patient Portal account.',
+                    ['MRN' => $mrn],
+                    'index.php?auth=activate&phone=' . urlencode($phone),
+                    'Activate Patient Portal Account'
+                );
+            }
             $logAudit('Completed registration & issued MRN', 'patients', $mrn);
             flash($fullName . ' is now fully Registered with permanent MRN ' . $mrn . ($checkinIdx >= 0 ? ' and Checked-in for their appointment!' : '!'));
             redirect($return);
@@ -711,21 +1097,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $last     = trim((string) ($_POST['last_name'] ?? ''));
             $bdate    = trim((string) ($_POST['birthdate'] ?? ''));
             $sex      = trim((string) ($_POST['sex'] ?? 'Not specified'));
-            $phone    = trim((string) ($_POST['phone'] ?? ''));
-            $blood    = trim((string) ($_POST['blood_type'] ?? 'Not specified'));
-            $email    = trim((string) ($_POST['email'] ?? ''));
-            $hin      = trim((string) ($_POST['hin'] ?? '—')) ?: '—';
-            $country  = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
-            $province = trim((string) ($_POST['province'] ?? 'Zamboanga del Sur'));
-            $city     = trim((string) ($_POST['city'] ?? 'Zamboanga City'));
-            $barangay = trim((string) ($_POST['barangay'] ?? ''));
-            $street   = trim((string) ($_POST['street'] ?? 'N/A'));
-            $postal   = trim((string) ($_POST['postal_code'] ?? '7000'));
+            $noPhone   = !empty($_POST['no_phone']);
+            $phone     = $noPhone ? '' : trim((string) ($_POST['phone'] ?? ''));
+            $cFirst    = trim((string) ($_POST['contact_first_name'] ?? ''));
+            $cMiddle   = trim((string) ($_POST['contact_middle_name'] ?? ''));
+            $cLast     = trim((string) ($_POST['contact_last_name'] ?? ''));
+            $cRelBase  = trim((string) ($_POST['contact_relationship'] ?? ''));
+            $cRelOther = trim((string) ($_POST['contact_relationship_other'] ?? ''));
+            $cRel      = (strcasecmp($cRelBase, 'Other') === 0 && $cRelOther !== '') ? 'Other (' . $cRelOther . ')' : $cRelBase;
+            $cName     = trim($cFirst . ($cMiddle !== '' ? ' ' . $cMiddle : '') . ' ' . $cLast);
+            if ($cName === '' && !empty($_POST['contact_name'])) {
+                $cName = trim((string) $_POST['contact_name']);
+            }
+            $cPhone    = trim((string) ($_POST['contact_phone'] ?? ''));
+            $blood     = trim((string) ($_POST['blood_type'] ?? 'Not specified'));
+            $email     = trim((string) ($_POST['email'] ?? ''));
+            $hin       = trim((string) ($_POST['hin'] ?? '—')) ?: '—';
+            $country   = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province  = trim((string) ($_POST['province'] ?? 'Zamboanga del Sur'));
+            $city      = trim((string) ($_POST['city'] ?? 'Zamboanga City'));
+            $barangay  = trim((string) ($_POST['barangay'] ?? ''));
+            $street    = trim((string) ($_POST['street'] ?? 'N/A'));
+            $postal    = trim((string) ($_POST['postal_code'] ?? '7000'));
 
             $fullName = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
-            if ($fullName === '' || $phone === '') {
-                flash('Please enter the patient name and phone number.');
+            if ($fullName === '' || $bdate === '') {
+                flash('Please enter the patient name and birthdate.');
                 redirect($return);
+            }
+            if ($noPhone) {
+                if ($cFirst === '' || $cLast === '' || $cRelBase === '' || (strcasecmp($cRelBase, 'Other') === 0 && $cRelOther === '') || $cPhone === '') {
+                    flash('When patient has no phone number, contact person first name, last name, relationship (with specification if Other), and contact number are required.');
+                    redirect($return);
+                }
+                $phone = '';
+            } else {
+                if ($phone === '') {
+                    flash('Please enter a valid patient mobile number or check "Patient has no phone number".');
+                    redirect($return);
+                }
+                if (empty($_POST['phone_verified']) && $orig === '') {
+                    flash('Patient mobile number must be verified via OTP before registration.');
+                    redirect($return);
+                }
             }
             $fmtBirth = ($bdate !== '' && strtotime($bdate) !== false) ? date('M d, Y', strtotime($bdate)) : $bdate;
             $addrStr  = implode(', ', array_filter([$street, $barangay, $city, $province, $country, $postal]));
@@ -740,30 +1154,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($idx !== null) {
                 $mrn  = !empty($st['patients'][$idx][9]) ? (string) $st['patients'][$idx][9] : db_next_mrn();
-                $ptId = $st['patients'][$idx][8] ?? str_replace('MRN-', 'P-', $mrn);
+                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
+                    $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                }
+                $ptId = $mrn;
                 $st['patients'][$idx] = [
-                    $fullName, $fmtBirth, $phone, $hin, initials($fullName, 2), $sex, $blood, $addrStr, $ptId, $mrn, 'Registered', $st['patients'][$idx][11] ?? date('Y-m-d'),
-                    'country' => $country, 'province' => $province, 'city' => $city, 'barangay' => $barangay, 'street' => $street, 'postal_code' => $postal, 'phone_verified' => 1, 'email' => $email, 'mrn' => $mrn, 'reg_status' => 'Registered',
+                    $fullName, $fmtBirth, $noPhone ? '—' : $phone, $hin, initials($fullName, 2), $sex, $blood, $addrStr, $ptId, $mrn, 'Registered', $st['patients'][$idx][11] ?? date('Y-m-d'),
+                    'country'                    => $country, 'province' => $province, 'city' => $city, 'barangay' => $barangay, 'street' => $street, 'postal_code' => $postal, 'phone_verified' => $noPhone ? 0 : 1, 'email' => $email, 'mrn' => $mrn, 'reg_status' => 'Registered', 'registration_status' => 'Registered',
+                    'first_name'                 => $first, 'middle_name' => $middle, 'last_name' => $last,
+                    'no_phone'                   => $noPhone ? 1 : 0, 'contact_name' => $cName, 'contact_relationship' => $cRel, 'contact_phone' => $cPhone,
+                    'contact_first_name'         => $cFirst, 'contact_middle_name' => $cMiddle, 'contact_last_name' => $cLast,
+                    'contact_relationship_base'  => $cRelBase, 'contact_relationship_other' => $cRelOther,
+                    'id_checked'                 => 1,
                 ];
                 $logAudit('Updated', 'patients', $mrn);
                 flash('Patient record updated for ' . $fullName . ' (' . $mrn . ').');
             } else {
                 $mrn  = db_next_mrn();
-                $ptId = str_replace('MRN-', 'P-', $mrn);
+                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
+                    $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                }
+                $ptId = $mrn;
                 $row  = [
-                    $fullName, $fmtBirth, $phone, $hin, initials($fullName, 2), $sex, $blood, $addrStr, $ptId, $mrn, 'Registered', date('Y-m-d'),
-                    'country' => $country, 'province' => $province, 'city' => $city, 'barangay' => $barangay, 'street' => $street, 'postal_code' => $postal, 'phone_verified' => 1, 'email' => $email, 'mrn' => $mrn, 'reg_status' => 'Registered',
+                    $fullName, $fmtBirth, $noPhone ? '—' : $phone, $hin, initials($fullName, 2), $sex, $blood, $addrStr, $ptId, $mrn, 'Registered', date('Y-m-d'),
+                    'country'                    => $country, 'province' => $province, 'city' => $city, 'barangay' => $barangay, 'street' => $street, 'postal_code' => $postal, 'phone_verified' => $noPhone ? 0 : 1, 'email' => $email, 'mrn' => $mrn, 'reg_status' => 'Registered', 'registration_status' => 'Registered',
+                    'first_name'                 => $first, 'middle_name' => $middle, 'last_name' => $last,
+                    'no_phone'                   => $noPhone ? 1 : 0, 'contact_name' => $cName, 'contact_relationship' => $cRel, 'contact_phone' => $cPhone,
+                    'contact_first_name'         => $cFirst, 'contact_middle_name' => $cMiddle, 'contact_last_name' => $cLast,
+                    'contact_relationship_base'  => $cRelBase, 'contact_relationship_other' => $cRelOther,
+                    'id_checked'                 => 1,
                 ];
                 array_unshift($st['patients'], $row);
-                push_sim_message(
-                    'sms',
-                    $phone,
-                    'West Metro Medical Center — Registration Confirmed',
-                    'Hello ' . $fullName . '! You are registered at West Metro Medical Center with MRN ' . $mrn . '. Use your mobile number to activate your Patient Portal account.',
-                    ['MRN' => $mrn],
-                    'index.php?auth=activate&phone=' . urlencode($phone),
-                    'Activate Patient Portal Account'
-                );
+                if (!$noPhone && $phone !== '') {
+                    push_sim_message(
+                        'sms',
+                        $phone,
+                        'West Metro Medical Center — Registration Confirmed',
+                        'Hello ' . $fullName . '! You are registered at West Metro Medical Center with MRN ' . $mrn . '. Use your mobile number to activate your Patient Portal account.',
+                        ['MRN' => $mrn],
+                        'index.php?auth=activate&phone=' . urlencode($phone),
+                        'Activate Patient Portal Account'
+                    );
+                }
                 $logAudit('Registered patient', 'patients', $mrn);
                 flash($fullName . ' registered with permanent MRN ' . $mrn . '!');
             }
@@ -783,6 +1215,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     redirect(url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Complete registration', 'patient' => $ptName, 'checkin_appt' => $idx]));
                 }
                 $st['appointments'][$idx][3] = 'Checked-in';
+                db_save_state($st);
                 $logAudit('Checked-in', 'appointments', '#APT-' . (1000 + $idx));
                 flash($ptName . ' checked in and ready for doctor consultation.');
             }
@@ -793,6 +1226,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $status = trim((string) ($_POST['status'] ?? ''));
             if (isset($st['appointments'][$idx]) && $status !== '') {
                 $st['appointments'][$idx][3] = $status;
+                db_save_state($st);
                 $logAudit('Status -> ' . $status, 'appointments', '#APT-' . (1000 + $idx));
                 flash('Appointment status updated to ' . $status . '.');
             }
@@ -838,6 +1272,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             array_unshift($st['appointments'], [$slot, $patient, $visitType, 'Scheduled', $complaint, $doctor, $dept, $dateFmt, $ptRef]);
+            db_save_state($st);
             $logAudit('Booked', 'appointments', '#APT-' . rand(1000, 9999));
             flash('Appointment scheduled with ' . $doctor . ' on ' . $dateFmt . ' at ' . slot_label($slot));
             redirect(url(['page' => 'book', 'step' => 4, 'appt' => 0, 'patient' => $ptParam]));
@@ -853,6 +1288,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($complaint !== '') {
                     $st['appointments'][$idx][4] = $complaint;
                 }
+                db_save_state($st);
                 $logAudit('Updated appointment', 'appointments', '#APT-' . (1000 + $idx));
                 flash('Appointment updated.');
             }
@@ -867,6 +1303,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     redirect($return);
                 }
                 $st['appointments'][$idx][3] = 'Cancelled';
+                db_save_state($st);
                 $logAudit('Cancelled', 'appointments', '#APT-' . (1000 + $idx));
                 flash('Appointment on ' . ($cur[7] ?? '') . ' has been cancelled.');
             }
@@ -942,46 +1379,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $patient = trim((string) ($_POST['patient'] ?? ''));
             $note    = trim((string) ($_POST['progress_note'] ?? ''));
             if ($patient !== '' && $note !== '') {
+                $newNote = [
+                    'author' => current_user_name('Doctor'),
+                    'time'   => date('M d, Y · H:i'),
+                    'note'   => $note,
+                ];
                 foreach ($st['admissions'] as &$adm) {
-                    if (strcasecmp((string) $adm[0], $patient) === 0) {
+                    if (strcasecmp((string) ($adm[0] ?? ($adm['patient_name'] ?? '')), $patient) === 0) {
                         if (!isset($adm[11]) || !is_array($adm[11])) {
-                            $adm[11] = [];
+                            $adm[11] = is_array($adm['clinical_notes'] ?? null) ? $adm['clinical_notes'] : [];
                         }
-                        array_unshift($adm[11], [
-                            'author' => current_user_name('Doctor'),
-                            'time'   => date('M d, Y · H:i'),
-                            'note'   => $note,
-                        ]);
+                        array_unshift($adm[11], $newNote);
+                        $adm['clinical_notes'] = $adm[11];
                         break;
                     }
                 }
                 unset($adm);
+                db_save_state($st);
                 $logAudit('Added progress note', 'admissions', $patient);
                 flash('Progress note recorded for ' . $patient . '.');
             }
-            redirect(url(['page' => 'doctor-admissions', 'patient' => $patient]));
+            redirect(url(['page' => 'doctor-admissions', 'view' => 'chart', 'patient' => $patient]));
 
         case 'order_discharge':
             $patient   = trim((string) ($_POST['patient'] ?? ''));
             $finalDiag = trim((string) ($_POST['final_diagnosis'] ?? ''));
             $summary   = trim((string) ($_POST['discharge_summary'] ?? ''));
             foreach ($st['admissions'] as &$adm) {
-                if (strcasecmp((string) $adm[0], $patient) === 0) {
+                if (strcasecmp((string) ($adm[0] ?? ($adm['patient_name'] ?? '')), $patient) === 0) {
                     $adm[5] = $finalDiag !== '' ? $finalDiag : ($adm[5] ?? '');
                     $adm[6] = 'For discharge';
                     $adm[9] = $summary;
+                    $adm['final_diagnosis'] = $adm[5];
+                    $adm['status']          = 'For discharge';
+                    $adm['discharge_order'] = $summary;
                     break;
                 }
             }
             unset($adm);
+            db_save_state($st);
             $logAudit('Marked For discharge', 'admissions', $patient);
             flash($patient . ' marked "For discharge" with completed discharge summary.');
-            redirect(url(['page' => 'doctor-admissions', 'patient' => $patient]));
+            redirect(url(['page' => 'doctor-admissions', 'view' => 'chart', 'patient' => $patient]));
 
         case 'clear_discharge_billing':
             $patient = trim((string) ($_POST['patient'] ?? ''));
-            $cStatus = in_array($_POST['clearance_status'] ?? '', ['Cleared', 'Exception'], true) ? (string) $_POST['clearance_status'] : 'Cleared';
-            $reason  = trim((string) ($_POST['reason'] ?? ''));
+            $cStatus = 'Cleared';
+            $reason  = trim((string) ($_POST['reason'] ?? 'All inpatient charges verified and settled'));
+
+            // Discharge clearance can only be marked Cleared after processing full payment
+            $ptBal = 0.0;
+            foreach ($st['bills'] ?? [] as $i => $b) {
+                $nb = normalize_bill_row($b, $i);
+                if (strcasecmp($nb['patient'], $patient) === 0) {
+                    $ptBal += $nb['balance'];
+                }
+            }
+            if ($ptBal > 0.009) {
+                flash('Cannot mark cleared: ' . $patient . ' has an outstanding balance of ' . format_money($ptBal) . '. Please process payment first before granting discharge clearance.');
+                redirect(url(['page' => 'discharge-clearance']));
+            }
+
             foreach ($st['admissions'] as &$adm) {
                 if (strcasecmp((string) $adm[0], $patient) === 0) {
                     $adm[7]  = $cStatus;
@@ -990,8 +1448,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             unset($adm);
+            db_save_state($st);
             $logAudit('Billing clearance -> ' . $cStatus, 'admissions', $patient);
-            flash('Discharge billing status for ' . $patient . ' set to ' . $cStatus . '.');
+            flash('Discharge billing clearance for ' . $patient . ' granted (' . $cStatus . ').');
             redirect(url(['page' => 'discharge-clearance']));
 
         case 'discharge':
@@ -1010,8 +1469,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect($return);
             }
             $bClear = (string) ($found[7] ?? 'Pending');
-            if (!in_array($bClear, ['Cleared', 'Exception'], true)) {
-                flash('Cannot finalize discharge yet: Cashier Billing Clearance for ' . $found[0] . ' is still Pending. Please have the Cashier mark the admission Cleared or Exception first.');
+            if ($bClear !== 'Cleared') {
+                flash('Cannot finalize discharge yet: Cashier Billing Clearance for ' . $found[0] . ' is still Pending. Please process payment and have the Cashier mark the admission Cleared first.');
                 redirect(url(['page' => 'admissions']));
             }
 
@@ -1353,6 +1812,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             $receiptNo = 'OR-' . str_pad((string) ($maxOr + 1), 4, '0', STR_PAD_LEFT);
+
+            $proofPath = null;
+            if (in_array($method, ['HMO', 'PhilHealth'], true) && !empty($_FILES['proof_doc']['name'])) {
+                $up = store_proof_image('proof_doc', 'payments');
+                if (!empty($up['path'])) {
+                    $proofPath = $up['path'];
+                } elseif (!empty($up['error'])) {
+                    flash($up['error']);
+                    redirect($return);
+                }
+            }
+
             array_unshift($st['payments'], [
                 'receipt_no'      => $receiptNo,
                 'bill_no'         => $normBill['bill_no'],
@@ -1362,13 +1833,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'change_due'      => $changeDue,
                 'payment_method'  => $method,
                 'reference_no'    => $method === 'Cash' ? '—' : $refNo,
+                'proof_path'      => $proofPath,
                 'cashier_name'    => current_user_name($role),
                 'paid_date'       => date('Y-m-d'),
                 'paid_at'         => date('M d, Y · H:i'),
                 'items'           => $normBill['items'],
             ]);
+
+            // If patient is an admitted inpatient and total remaining balance across all bills is 0, auto-clear discharge billing!
+            $ptTotalBal = 0.0;
+            foreach ($st['bills'] as $chkIdx => $chkB) {
+                $normChkB = normalize_bill_row($chkB, $chkIdx);
+                if (strcasecmp($normChkB['patient'], $normBill['patient']) === 0) {
+                    $ptTotalBal += $normChkB['balance'];
+                }
+            }
+            if ($ptTotalBal <= 0.009) {
+                foreach ($st['admissions'] as &$adClear) {
+                    if (strcasecmp((string) $adClear[0], $normBill['patient']) === 0) {
+                        $adClear[7]  = 'Cleared';
+                        $adClear[10] = 'Payment settled via ' . $method . ' (' . $receiptNo . ')';
+                        break;
+                    }
+                }
+                unset($adClear);
+            }
+
+            db_save_state($st);
             $logAudit('Collected payment (' . $method . ')', 'payments', $receiptNo);
-            flash('Payment of ' . format_money($amtPay) . ' via ' . $method . ' recorded (' . $receiptNo . ').');
+            flash('Payment of ' . format_money($amtPay) . ' via ' . $method . ' recorded (' . $receiptNo . ').' . ($ptTotalBal <= 0.009 ? ' Inpatient discharge billing cleared.' : ''));
             redirect(url(['page' => 'payment-history', 'detail' => 'receipt', 'or' => $receiptNo]));
 
         case 'create_bill':
@@ -1485,11 +1978,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $logAudit('Created ' . $uRole . ' account (Pending activation)', 'users', '#' . $finalId);
 
                 if (!empty($mailRes['ok'])) {
-                    flash('Created ' . $uRole . ' account for ' . $fullName . '. An activation email has been sent to ' . $email . '.');
+                    flash('Created ' . $uRole . ' account for ' . $fullName . '. Activation email sent directly to ' . $email . '. Please check your inbox.');
                 } else {
-                    flash('Created ' . $uRole . ' account for ' . $fullName . '. Activation link ready (Status: ' . ($mailRes['error'] ?? 'Pending SMTP configuration') . ').');
+                    flash('Created ' . $uRole . ' account for ' . $fullName . ', but email delivery to ' . $email . ' failed: ' . ($mailRes['error'] ?? 'SMTP delivery error'));
                 }
             }
+            redirect($return);
+
+        case 'edit_user_details':
+            $editUid = trim((string) ($_POST['user_id'] ?? ''));
+            $reason  = trim((string) ($_POST['reason'] ?? ''));
+            $acc     = $editUid !== '' ? db_find_account_by_id($editUid) : null;
+            if (!$acc) {
+                flash('Account not found.');
+                redirect($return);
+            }
+            if (!in_array((string) $acc['role'], ['Doctor', 'Staff', 'Cashier'], true)) {
+                flash('Only Doctor, Staff, and Cashier accounts can be edited here.');
+                redirect($return);
+            }
+            if (strlen($reason) < 5) {
+                flash('A reason (at least 5 characters) is required to edit an account.');
+                redirect($return);
+            }
+            $first     = trim((string) ($_POST['first_name'] ?? ''));
+            $middle    = trim((string) ($_POST['middle_name'] ?? ''));
+            $last      = trim((string) ($_POST['last_name'] ?? ''));
+            $email     = strtolower(trim((string) ($_POST['email'] ?? '')));
+            $phone     = trim((string) ($_POST['phone'] ?? ''));
+            $birthdate = trim((string) ($_POST['birthdate'] ?? ''));
+            $sex       = trim((string) ($_POST['sex'] ?? ''));
+            $fullName  = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
+            if ($fullName === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                flash('Please enter a valid name and email address.');
+                redirect($return);
+            }
+            $isDoc   = ($acc['role'] === 'Doctor');
+            $dept    = $isDoc ? trim((string) ($_POST['department'] ?? '')) : '';
+            $spec    = $isDoc ? trim((string) ($_POST['specialty'] ?? '')) : '';
+            $license = $isDoc ? trim((string) ($_POST['license'] ?? '')) : '';
+            if ($isDoc && ($dept === '' || $spec === '' || $license === '')) {
+                flash('Department, specialty, and PRC license are required for doctors.');
+                redirect($return);
+            }
+            $dup = db()->prepare('SELECT COUNT(*) FROM accounts WHERE LOWER(email) = LOWER(:em) AND id <> :id');
+            $dup->execute([':em' => $email, ':id' => $acc['id']]);
+            if ((int) $dup->fetchColumn() > 0) {
+                flash('That email address is already used by another account.');
+                redirect($return);
+            }
+
+            $newVals = ['full_name' => $fullName, 'email' => $email, 'phone' => $phone, 'birthdate' => $birthdate,
+                'sex' => $sex, 'department' => $dept, 'specialty' => $spec, 'license_number' => $license];
+            $changed = [];
+            foreach ($newVals as $col => $val) {
+                if ((string) ($acc[$col] ?? '') !== (string) $val) {
+                    $changed[] = $col;
+                }
+            }
+            if (!$changed) {
+                flash('No changes were made.');
+                redirect($return);
+            }
+            db()->prepare('UPDATE accounts SET full_name = :fn, email = :em, phone = :ph, birthdate = :bd, sex = :sx, department = :dp, specialty = :sp, license_number = :ln WHERE id = :id')
+                ->execute([':fn' => $fullName, ':em' => $email, ':ph' => $phone, ':bd' => $birthdate, ':sx' => $sex,
+                    ':dp' => $dept, ':sp' => $spec, ':ln' => $license, ':id' => $acc['id']]);
+
+            $st = db_load_state();
+            $_SESSION['state'] = &$st;
+            $logAudit('Edited ' . $acc['role'] . ' account [' . implode(', ', $changed) . '] — Reason: ' . $reason, 'users', $email);
+            db_save_state($st);
+            flash('Account details updated for ' . $fullName . '. Reason recorded in the audit log.');
             redirect($return);
 
         case 'resend_activation_email':
@@ -1534,9 +2093,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $logAudit('Resent activation email', 'accounts', '#' . $finalId);
 
             if (!empty($mailRes['ok'])) {
-                flash('Activation email resent successfully to ' . $destEmail . '.');
+                flash('Activation email sent directly to ' . $destEmail . '. Please check your inbox.');
             } else {
-                flash('Activation link refreshed for ' . $destEmail . '. (Status: ' . ($mailRes['error'] ?? 'Simulated preview available') . ').');
+                flash('Failed to deliver activation email to ' . $destEmail . ': ' . ($mailRes['error'] ?? 'SMTP delivery error'));
             }
             redirect($return);
 
@@ -1546,7 +2105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $name  = trim((string) ($_POST['name'] ?? 'User'));
             $token = bin2hex(random_bytes(24));
             $expiresAt = time() + (24 * 3600);
-            db()->prepare('UPDATE accounts SET force_password_change = 1, set_password_token = :tk, set_password_expires_at = :exp WHERE UPPER(user_id) = :uid')
+            db()->prepare('UPDATE accounts SET force_password_change = (CASE WHEN role = "Admin" THEN 0 ELSE 1 END), set_password_token = :tk, set_password_expires_at = :exp WHERE UPPER(user_id) = :uid')
                 ->execute([':tk' => $token, ':exp' => $expiresAt, ':uid' => strtoupper($uid)]);
 
             $scheme   = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443) ? 'https' : 'http';
@@ -1555,17 +2114,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $baseUrl  = $scheme . '://' . $host . $dir;
             $setPwUrl = $baseUrl . '/index.php?auth=login&set_password=1&uid=' . urlencode($uid) . '&token=' . urlencode($token);
 
-            push_sim_message(
-                'email',
-                $email ?: $uid,
-                'West Metro Medical Center — Password Reset / Setup Link',
-                'A password setup link was generated for ' . $name . ' (' . $uid . '). Use the button below to choose a new password.',
-                ['Account ID' => $uid],
-                $setPwUrl,
-                'Open Set-Password Screen'
-            );
+            $targetEmail = $email !== '' ? $email : (string) (db_find_account_by_id($uid)['email'] ?? '');
+            if ($targetEmail !== '') {
+                $mailRes = send_account_activation_email($targetEmail, $name, 'User', $uid, $setPwUrl);
+                if (!empty($mailRes['ok'])) {
+                    flash('Set-Password link sent directly to ' . $targetEmail . '. Please check your inbox.');
+                } else {
+                    flash('Could not deliver email to ' . $targetEmail . ': ' . ($mailRes['error'] ?? 'SMTP delivery failed'));
+                }
+            } else {
+                flash('Cannot send setup email: no email address associated with account ' . $uid . '.');
+            }
             $logAudit('Sent password setup link', 'users', '#' . $uid);
-            flash('Set-Password link sent to ' . $name . ' (' . $uid . ').');
             redirect($return);
 
         case 'toggle_user':
@@ -1821,6 +2381,9 @@ if (!in_array($role, ['Admin', 'Staff', 'Cashier', 'Doctor', 'Patient'], true)) 
     if (in_array($authView, ['register', 'activate'], true) || !empty($_SESSION['register_error']) || !empty($_SESSION['activate_error'])) {
         require __DIR__ . '/pages/register.php';
         exit;
+    }
+    if ($authView === 'login' && empty($_GET['set_password'])) {
+        unset($_SESSION['force_pw_change_uid'], $_SESSION['set_pw_error']);
     }
     $showLogin = $authView === 'login'
         || !empty($_SESSION['login_error'])

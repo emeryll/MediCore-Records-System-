@@ -3,6 +3,9 @@
 if (!empty($_GET['clear_sim'])) {
     unset($_SESSION['sim_messages']);
 }
+if (!empty($_SESSION['sim_messages']) && is_array($_SESSION['sim_messages'])) {
+    $_SESSION['sim_messages'] = array_values(array_filter($_SESSION['sim_messages'], static fn ($m) => ($m['channel'] ?? '') === 'SMS'));
+}
 $name   = current_user_name($role);
 $notes  = $state['notifications'][$role] ?? [];
 $unread = count(array_filter($notes, static fn ($n) => is_array($n) && empty($n[3])));
@@ -38,8 +41,9 @@ $unread = count(array_filter($notes, static fn ($n) => is_array($n) && empty($n[
     </script>
 </head>
 <body>
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
 <div class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="app-sidebar">
         <?= logo(true) ?>
         <div class="role-chip"><span><?= e($role === 'Staff' ? 'Front Desk' : $role) ?></span> Portal</div>
         <nav>
@@ -61,6 +65,7 @@ $unread = count(array_filter($notes, static fn ($n) => is_array($n) && empty($n[
 
     <div class="main-shell">
         <header class="topbar">
+            <button type="button" class="icon-btn nav-toggle" id="nav-toggle" aria-label="Open menu" aria-controls="app-sidebar" aria-expanded="false"><?= icon('menu', 22) ?></button>
             <div class="mobile-brand"><?= logo() ?></div>
             <?php if (in_array($role, ['Doctor', 'Staff'], true)): ?>
             <form class="top-search" method="get" action="index.php">
@@ -101,14 +106,56 @@ $unread = count(array_filter($notes, static fn ($n) => is_array($n) && empty($n[
                     </div>
                 </details>
                 <div class="top-divider"></div>
+                <?php
+                if ($role === 'Patient' && function_exists('db_get_account_linked_patients')) {
+                    $linkedProfiles = db_get_account_linked_patients((string) ($_SESSION['user_id'] ?? ''));
+                    $activePid      = (string) ($_SESSION['active_patient_id'] ?? ($_SESSION['user_id'] ?? ''));
+                    if (!empty($linkedProfiles)) {
+                ?>
+                    <div class="patient-profile-dropdown" style="display:inline-flex; align-items:center; gap:6px; background:#f1f5f9; padding:3px 8px; border-radius:20px; border:1px solid var(--gray-200); margin-right:8px;">
+                        <label for="header-profile-select" style="font-size:10.5px; font-weight:800; color:var(--gray-500); text-transform:uppercase; letter-spacing:0.5px; padding-left:4px; margin:0; cursor:pointer;">Profile:</label>
+                        <div style="position:relative; display:inline-flex; align-items:center;">
+                            <select id="header-profile-select"
+                                    aria-label="Switch active patient profile"
+                                    onchange="if (this.value) window.location.href = this.value;"
+                                    style="height:26px; padding:0 24px 0 10px; font-size:11.5px; font-weight:700; color:var(--teal-800); background:#fff; border:1px solid var(--gray-300); border-radius:14px; outline:none; cursor:pointer; appearance:none; -webkit-appearance:none; -moz-appearance:none; max-width:240px;">
+                                <?php foreach ($linkedProfiles as $lp):
+                                    $isCur = strcasecmp((string) $lp['patient_id'], $activePid) === 0;
+                                    $pTag = $lp['is_primary'] ? 'Me' : ($lp['relationship_label'] ?: 'Dependent');
+                                    $lpMrn = (string) ($lp['mrn'] ?: $lp['patient_id']);
+                                    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $lpMrn, $m)) {
+                                        $lpMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                                    }
+                                    $shortName = explode(' ', (string) $lp['patient_name'])[0];
+                                ?>
+                                    <option value="<?= e(url_with(['switch_patient' => $lp['patient_id']])) ?>" <?= $isCur ? 'selected' : '' ?>>
+                                        <?= e($shortName) ?> (<?= e($lpMrn) ?>) · <?= e($pTag) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <span style="position:absolute; right:7px; pointer-events:none; color:var(--teal-700); display:flex; align-items:center;">
+                                <?= icon('down', 12) ?>
+                            </span>
+                        </div>
+                    </div>
+                <?php
+                    }
+                }
+                $headerDisplayName = ($role === 'Patient' && !empty($_SESSION['active_patient_name'])) ? (string) $_SESSION['active_patient_name'] : $name;
+                $activeMrn = (string) ($_SESSION['active_patient_mrn'] ?? '');
+                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $activeMrn, $m)) {
+                    $activeMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                }
+                $headerDisplaySub  = ($role === 'Patient' && $activeMrn !== '') ? (str_starts_with($activeMrn, 'MRN-') ? $activeMrn : 'MRN ' . $activeMrn) : current_user_title($role);
+                ?>
                 <a href="<?= e(url(['page' => 'profile'])) ?>" class="btn btn-secondary btn-sm" style="display:flex; align-items:center; gap:6px; height:34px; padding:0 12px; font-size:12.5px; font-weight:600; text-decoration:none; margin-right:4px;">
                     <?= icon('user', 14) ?>
                     <span>Profile</span>
                 </a>
-                <div class="avatar"><?= e(initials($name, 2)) ?></div>
+                <div class="avatar"><?= e(initials($headerDisplayName, 2)) ?></div>
                 <div class="user-copy">
-                    <strong><?= e($name) ?></strong>
-                    <span><?= e(current_user_title($role)) ?></span>
+                    <strong><?= e($headerDisplayName) ?></strong>
+                    <span><?= e($headerDisplaySub) ?></span>
                 </div>
                 <form method="post" action="index.php" class="inline-form">
                     <input type="hidden" name="action" value="logout">

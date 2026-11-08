@@ -30,6 +30,8 @@ function icon(string $name, int $size = 18): string
         'arrow' => '<path d="m5 12 14 0m-6-6 6 6-6 6"/>',
         'lock' => '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
         'menu' => '<path d="M4 6h16M4 12h16M4 18h16"/>',
+        'check' => '<path d="M20 6 9 17l-5-5"/>',
+        'check-circle' => '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/>',
     ];
 
     $inner = $paths[$name] ?? $paths['grid'];

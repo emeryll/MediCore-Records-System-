@@ -15,6 +15,38 @@ $normalizeUserRole = static function (string $rawRole): string {
 };
 
 $allUsers = $state['users'] ?? [];
+
+// Patients registered at the front desk who have not activated their portal account yet
+// are still listed here (read-only) with the status "Inactive".
+$activatedKeys = [];
+foreach ($allUsers as $au) {
+    if (strcasecmp($normalizeUserRole((string) ($au[2] ?? '')), 'Patient') === 0) {
+        $activatedKeys[strtolower(trim((string) $au[0]))] = true;
+        $activatedKeys[strtolower(trim((string) ($au[7] ?? '')))] = true;
+    }
+}
+foreach ($state['patients'] ?? [] as $pt) {
+    if (is_provisional_patient($pt)) {
+        continue;
+    }
+    // Patients with no phone get no portal account and do not show as pending activation
+    if (!empty($pt['no_phone']) || empty($pt[2]) || $pt[2] === '—') {
+        continue;
+    }
+    $ptName = trim((string) ($pt[0] ?? ''));
+    $ptMrn  = (string) patient_mrn_display($pt, '');
+    $ptPid  = (string) ($pt[8] ?? '');
+    if ($ptName === '' || isset($activatedKeys[strtolower($ptName)])
+        || ($ptMrn !== '' && isset($activatedKeys[strtolower($ptMrn)]))
+        || ($ptPid !== '' && isset($activatedKeys[strtolower($ptPid)]))) {
+        continue;
+    }
+    $allUsers[] = [
+        $ptName, (string) ($pt['email'] ?? ''), 'Patient', 'Inactive', 'Never', '', '',
+        $ptMrn !== '' ? $ptMrn : $ptPid, '', '', (string) ($pt[1] ?? ''), (string) ($pt[2] ?? ''),
+        'not_activated' => true,
+    ];
+}
 $users = array_values(array_filter(
     $allUsers,
     static fn ($u) => (
@@ -65,8 +97,8 @@ $categories = [
         'rows'     => [],
     ],
     'Patient' => [
-        'title'    => 'Activated Patient Portal Accounts',
-        'subtitle' => 'Patients who activated their portal account via SMS OTP',
+        'title'    => 'Patient Accounts',
+        'subtitle' => 'Registered patients — Inactive until they activate their portal account via SMS OTP',
         'badge'    => 'MRN Verified',
         'tone'     => 'success',
         'headers'  => ['MRN', 'Patient & Contact', 'Birthday & Age', 'Status', 'Last login', 'Actions'],
@@ -102,7 +134,7 @@ $headerActions = button('Add account', ['icon' => 'plus', 'href' => url(['page' 
     <?= stat_card('Doctors', (string) $totalDoctors, 'Physicians & specialists', 'patient', 'navy') ?>
     <?= stat_card('Staff', (string) $totalStaff, 'Front desk & ward staff', 'users', 'teal') ?>
     <?= stat_card('Cashiers', (string) $totalCashiers, 'Billing & cashier desk', 'card', 'amber') ?>
-    <?= stat_card('Patient Accounts', (string) $totalPatients, 'Activated portal accounts', 'clipboard', 'green') ?>
+    <?= stat_card('Patient Accounts', (string) $totalPatients, 'Registered & activated portal accounts', 'clipboard', 'green') ?>
 </div>
 
 <div class="table-card" style="margin-bottom: 20px;">
@@ -200,30 +232,31 @@ $headerActions = button('Add account', ['icon' => 'plus', 'href' => url(['page' 
                                 <?php
                                 $uStatus = (string) ($u[3] ?? 'Active');
                                 $isPending = ($uStatus === 'Pending' || (!empty($u['force_password_change']) && !empty($u['set_password_token'])));
+                                $isNotActivated = !empty($u['not_activated']);
                                 $statusBadge = match ($uStatus) {
                                     'Pending'  => badge('Pending Activation', 'warning'),
                                     'Disabled' => badge('Deactivated', 'danger'),
+                                    'Inactive' => badge('Inactive', 'neutral'),
                                     default    => badge('Active', 'success'),
                                 };
                                 ?>
                                 <td><?= $statusBadge ?></td>
                                 <td><?= e($u[4]) ?></td>
                                 <td>
+                                    <?php if ($isNotActivated): ?>
+                                        <span style="font-size:12px; color:var(--gray-500);">Awaiting patient activation</span>
+                                    <?php else: ?>
                                     <div class="row-actions" style="flex-wrap:wrap; gap:8px;">
                                         <a href="<?= e(url(['page' => 'users', 'modal' => 'User details', 'user_id' => $uId, 'email' => $u[1]])) ?>" style="display:inline-flex; align-items:center; gap:4px;"><?= icon('eye', 15) ?> Details</a>
-                                        <a href="<?= e(url(['page' => 'users', 'modal' => 'Edit user', 'email' => $u[1]])) ?>"><?= icon('edit', 15) ?> Edit</a>
+                                        <?php if (in_array($uRoleLabel, ['Doctor', 'Staff', 'Cashier'], true)): ?>
+                                        <a href="<?= e(url(['page' => 'users', 'modal' => 'Edit user', 'user_id' => $uId, 'email' => $u[1]])) ?>"><?= icon('edit', 15) ?> Edit</a>
+                                        <?php endif; ?>
                                         <?php if ($uStatus === 'Pending'): ?>
                                             <?= post_button('Resend Activation Email', 'resend_activation_email', ['user_id' => $uId, 'email' => $u[1], 'name' => $u[0], 'role' => $uRoleLabel], [
                                                 'plain' => true,
                                                 'class' => 'text-link',
                                                 'html'  => 'Resend Activation Email',
                                                 'confirm_msg' => 'Resend the secure activation email to ' . $u[1] . '?',
-                                            ]) ?>
-                                        <?php else: ?>
-                                            <?= post_button('', 'send_set_password_link', ['user_id' => $uId, 'email' => $u[1], 'name' => $u[0]], [
-                                                'plain' => true,
-                                                'class' => 'text-link',
-                                                'html'  => 'Reset Password Link',
                                             ]) ?>
                                         <?php endif; ?>
 
@@ -239,6 +272,7 @@ $headerActions = button('Add account', ['icon' => 'plus', 'href' => url(['page' 
                                             'confirm_msg' => $deactivateConfirm,
                                         ]) ?>
                                     </div>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>

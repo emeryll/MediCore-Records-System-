@@ -22,11 +22,45 @@ foreach (array_keys($catMap) as $c) {
     $counts[$c] = count(array_filter($allAppts, static fn ($r) => $catMap[$c]($r[3] ?? '')));
 }
 
+$deptFilter = (string) ($_GET['dept'] ?? 'All departments');
+
+// Resolve each appointment's department (stored value, else the doctor's department).
+$doctorDeptMap = [];
+foreach (doctors_data() as $d) {
+    $doctorDeptMap[strtolower((string) $d[0])] = (string) $d[1];
+}
+$apptDept = static function (array $r) use ($doctorDeptMap): string {
+    $d = trim((string) ($r[6] ?? ''));
+    if ($d === '' || in_array(strtolower($d), ['outpatient', 'inpatient', '—'], true)) {
+        $d = $doctorDeptMap[strtolower(trim((string) ($r[5] ?? '')))] ?? 'Unassigned';
+    }
+    return $d;
+};
+$deptOptions = ['All departments'];
+foreach ($allAppts as $r) {
+    $deptOptions[] = $apptDept($r);
+}
+$deptOptions = array_values(array_unique($deptOptions));
+sort($deptOptions);
+array_unshift($deptOptions, 'All departments');
+$deptOptions = array_values(array_unique($deptOptions));
+if (!in_array($deptFilter, $deptOptions, true)) {
+    $deptFilter = 'All departments';
+}
+
 $filteredEntries = [];
 foreach ($allAppts as $idx => $r) {
-    if ($catMap[$cat]($r[3] ?? '') && row_matches([$r[0], $r[1], $r[2], $r[4] ?? '', $r[5] ?? '', $r[7] ?? '', $r[8] ?? ''], $q)) {
-        $filteredEntries[] = ['idx' => $idx, 'row' => $r];
+    if ($catMap[$cat]($r[3] ?? '')
+        && ($deptFilter === 'All departments' || $apptDept($r) === $deptFilter)
+        && row_matches([$r[0], $r[1], $r[2], $r[4] ?? '', $r[5] ?? '', $r[7] ?? '', $r[8] ?? '', $apptDept($r)], $q)) {
+        $filteredEntries[] = ['idx' => $idx, 'row' => $r, 'dept' => $apptDept($r)];
     }
+}
+// Group by department (alphabetical), keeping original order within each department.
+usort($filteredEntries, static fn ($a, $b) => strcmp($a['dept'], $b['dept']) ?: ($a['idx'] <=> $b['idx']));
+$deptCounts = [];
+foreach ($filteredEntries as $fe) {
+    $deptCounts[$fe['dept']] = ($deptCounts[$fe['dept']] ?? 0) + 1;
 }
 $paged = paginate_rows($filteredEntries, 10, 'p');
 
@@ -41,7 +75,6 @@ foreach (['MON', 'TUE', 'WED', 'THU', 'FRI'] as $i => $d) {
 $rangeLabel = date('F j', $monTs) . ' – ' . date('j, Y', $friTs);
 
 $actions = '<div class="button-pair">'
-    . button('Quick add', ['variant' => 'secondary', 'icon' => 'plus', 'href' => url(['page' => 'patients', 'modal' => 'Quick add provisional'])])
     . button('Book appointment', ['icon' => 'calendar', 'href' => url(['page' => 'book', 'step' => 1])])
     . '</div>';
 ?>
@@ -119,18 +152,30 @@ $actions = '<div class="button-pair">'
 
 <?php
 $toolbar = toolbar_open('appointments', ['view' => 'List', 'cat' => $cat])
-    . search_box('Search patient name, MRN, complaint, or doctor...', 'q', $q)
+    . search_box('Search patient name, MRN, complaint, doctor, or department...', 'q', $q)
+    . '<div class="toolbar-right">'
+    . select_field('', 'dept', $deptOptions, $deptFilter)
+    . filter_button()
+    . '</div>'
     . toolbar_close();
 ?>
 
 <?= table_open(['Date & Time', 'Patient & Status', 'MRN', 'Doctor & Dept', 'Type & Reason', 'Appt Status', 'Check-in & Actions'], $toolbar) ?>
-<?php foreach ($paged['rows'] as $entry):
+<?php $lastDept = null; foreach ($paged['rows'] as $entry):
     $idx    = $entry['idx'];
     $r      = $entry['row'];
     $ptRec  = find_patient_record($state, (string) ($r[1] ?? ''));
     $isProv = $ptRec ? is_provisional_patient($ptRec) : str_starts_with((string) ($r[8] ?? ''), 'PROV-');
     $mrnStr = $ptRec ? patient_mrn_display($ptRec) : (str_starts_with((string) ($r[8] ?? ''), 'MRN-') ? $r[8] : '');
 ?>
+    <?php if ($entry['dept'] !== $lastDept): $lastDept = $entry['dept']; ?>
+    <tr class="dept-group-row">
+        <td colspan="7" style="background:var(--teal-50); border-top:2px solid var(--teal-200); padding:10px 18px;">
+            <strong style="color:var(--teal-800); font-size:13px;"><?= e($entry['dept']) ?></strong>
+            <span class="muted" style="font-size:11.5px; margin-left:8px;"><?= (int) $deptCounts[$entry['dept']] ?> appointment(s)</span>
+        </td>
+    </tr>
+    <?php endif; ?>
     <tr>
         <td>
             <strong><?= e($r[0]) ?></strong>
@@ -160,33 +205,31 @@ $toolbar = toolbar_open('appointments', ['view' => 'List', 'cat' => $cat])
         </td>
         <td>
             <strong><?= e($r[5] ?? '—') ?></strong>
-            <div class="muted" style="font-size:11px;"><?= e($r[6] ?? 'Outpatient') ?></div>
+            <div class="muted" style="font-size:11px;"><?= e($entry['dept']) ?></div>
         </td>
         <td>
             <strong><?= e($r[2]) ?></strong>
             <div class="complaint-text"><?= e($r[4] ?? '—') ?></div>
         </td>
         <td><?= badge($r[3], status_tone($r[3])) ?></td>
-        <td>
-            <div class="row-actions" style="flex-wrap:wrap; gap:6px;">
+        <td style="white-space:normal; min-width:200px;">
+            <div class="appt-action-cell">
                 <?php if (in_array($r[3], ['Scheduled', 'Confirmed', 'Upcoming', 'Waiting'], true)): ?>
                     <?php if ($isProv): ?>
-                        <?= button('Complete Reg & Check In', [
-                            'variant' => 'primary',
-                            'href'    => url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Complete registration', 'patient' => $r[1], 'checkin_appt' => $idx]),
-                        ]) ?>
+                        <a class="btn btn-primary btn-sm btn-appt-action" href="<?= e(url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Complete registration', 'patient' => $r[1], 'checkin_appt' => $idx])) ?>" title="Complete registration and check in">
+                            <?= icon('check', 13) ?>
+                            <span>Complete Reg &amp; Check In</span>
+                        </a>
                     <?php else: ?>
-                        <?= post_button('Check in', 'checkin_appointment', ['idx' => (string) $idx], ['variant' => 'primary']) ?>
+                        <?= post_button('Check In', 'checkin_appointment', ['idx' => (string) $idx], ['variant' => 'primary', 'class' => 'btn-sm btn-appt-action', 'icon' => 'check']) ?>
                     <?php endif; ?>
-                    <?= button('Reschedule', [
-                        'variant' => 'secondary',
-                        'href'    => url(['page' => 'book', 'step' => 2, 'reschedule' => $idx]),
-                    ]) ?>
+                    <a class="btn btn-secondary btn-sm btn-appt-action" href="<?= e(url(['page' => 'book', 'step' => 2, 'reschedule' => $idx])) ?>" title="Reschedule appointment">
+                        <span>Reschedule</span>
+                    </a>
                 <?php endif; ?>
-                <?= button('Details', [
-                    'variant' => 'secondary',
-                    'href'    => url(['page' => 'appointments', 'view' => 'List', 'cat' => $cat === 'All' ? null : $cat, 'modal' => 'Appointment details', 'appt' => $idx]),
-                ]) ?>
+                <a class="btn btn-secondary btn-sm btn-appt-action" href="<?= e(url(['page' => 'appointments', 'view' => 'List', 'cat' => $cat === 'All' ? null : $cat, 'modal' => 'Appointment details', 'appt' => $idx])) ?>" title="View appointment details">
+                    <span>Details</span>
+                </a>
             </div>
         </td>
     </tr>

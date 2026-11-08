@@ -83,7 +83,7 @@ $subtitle = match (true) {
     $isCompleteReg => 'Verify patient in person, confirm phone via SMS OTP, and issue permanent MRN.',
     $isPatient     => $modal === 'Edit patient' ? 'Update verified patient profile and contact details.' : 'Full walk-in registration — verifies phone via OTP and issues a permanent MRN.',
     $isUserDetail  => 'Complete employee account credentials, contact, and profile details.',
-    $isUser        => 'Create or update an employee account. A Set-Password link will be sent to the user.',
+    $isUser        => $modal === 'Edit user' ? 'Update this account\'s details. A reason is required and is recorded in the audit log.' : 'Create or update an employee account. A Set-Password link will be sent to the user.',
     $isAdmit       => 'Assign a Registered patient (with MRN) to a vacant hospital bed.',
     $isDischarge   => 'Record discharge summary, final diagnosis, and verify Cashier billing clearance.',
     $isBedMaint    => 'Set bed maintenance status and document reason.',
@@ -122,6 +122,9 @@ $subtitle = match (true) {
         <?php elseif ($isApptDetail): ?>
             <input type="hidden" name="action" value="update_appointment">
             <input type="hidden" name="idx" value="<?= e((string) $apptIdx) ?>">
+        <?php elseif ($isUser && $modal === 'Edit user'): ?>
+            <input type="hidden" name="action" value="edit_user_details">
+            <input type="hidden" name="user_id" value="<?= e((string) ($userRow[7] ?? ($_GET['user_id'] ?? ''))) ?>">
         <?php elseif ($isUser): ?>
             <input type="hidden" name="action" value="save_user">
             <input type="hidden" name="orig" value="<?= e($modal === 'Edit user' ? ($userRow[1] ?? '') : '') ?>">
@@ -168,14 +171,159 @@ $subtitle = match (true) {
                             <?= icon('down', 16) ?>
                         </span>
                     </label>
+                    <div class="field" style="justify-content:flex-end;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600; font-size:13px; color:#92400e; background:#fff8e6; border:1px solid #fde68a; border-radius:8px; padding:10px 12px; min-height:42px;">
+                            <input type="checkbox" name="no_phone" id="qp-no-phone" value="1" style="width:16px; height:16px;">
+                            <span>Patient has no phone number</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div id="qp-phone-wrap" class="form-grid" style="margin-top:12px;">
                     <label class="field">
-                        <span class="field-label">Contact Mobile Number *</span>
+                        <span class="field-label">Patient Mobile Number <span style="color:#dc2626;">*</span></span>
                         <span class="input-wrap">
-                            <input type="tel" name="phone" placeholder="09XXXXXXXXX" maxlength="11" required oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,11);">
+                            <input type="tel" name="phone" id="qp-phone" placeholder="09XXXXXXXXX" maxlength="11" required oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,11);">
                         </span>
-                        <small class="field-hint">No OTP required during phone-in call.</small>
+                        <small class="field-hint">No OTP required during phone-in booking.</small>
                     </label>
                 </div>
+
+                <div id="qp-contact-section" style="display:none; margin-top:16px; padding:14px; background:#f8fafc; border:1px solid var(--gray-200); border-radius:8px;">
+                    <strong style="font-size:13px; color:var(--navy-900); display:block; margin-bottom:4px;">
+                        Contact Person (for Notifications &amp; Reminders)
+                        <span id="qp-contact-req-badge" style="display:none; color:#dc2626; font-size:11.5px; font-weight:600; margin-left:6px;">(Required when patient has no phone)</span>
+                    </strong>
+                    <p style="margin:0 0 10px; font-size:11.5px; color:var(--gray-500);">
+                        This number is only used for appointment reminders. It cannot be used to activate an online portal account for the patient.
+                    </p>
+                    <div class="form-grid three-col">
+                        <label class="field">
+                            <span class="field-label">First Name <span id="qp-cfirst-req" style="display:none; color:#dc2626;">*</span></span>
+                            <span class="input-wrap">
+                                <input type="text" name="contact_first_name" id="qp-contact-first-name" placeholder="First name">
+                            </span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">Middle Name <small style="color:var(--gray-500); font-weight:normal;">(optional)</small></span>
+                            <span class="input-wrap">
+                                <input type="text" name="contact_middle_name" id="qp-contact-middle-name" placeholder="Middle name">
+                            </span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">Last Name <span id="qp-clast-req" style="display:none; color:#dc2626;">*</span></span>
+                            <span class="input-wrap">
+                                <input type="text" name="contact_last_name" id="qp-contact-last-name" placeholder="Last name">
+                            </span>
+                        </label>
+                    </div>
+                    <div class="form-grid three-col" style="margin-top:12px;">
+                        <label class="field">
+                            <span class="field-label">Relationship <span id="qp-crel-req" style="display:none; color:#dc2626;">*</span></span>
+                            <span class="input-wrap">
+                                <select name="contact_relationship" id="qp-contact-relationship">
+                                    <option value="" disabled selected hidden>Select relationship</option>
+                                    <option value="Spouse">Spouse</option>
+                                    <option value="Parent">Parent</option>
+                                    <option value="Child">Child</option>
+                                    <option value="Sibling">Sibling</option>
+                                    <option value="Guardian">Guardian</option>
+                                    <option value="Relative">Relative</option>
+                                    <option value="Caregiver">Caregiver</option>
+                                    <option value="Other">Other</option>
+                                </select>
+                                <?= icon('down', 16) ?>
+                            </span>
+                        </label>
+                        <label class="field" id="qp-contact-rel-other-wrap" style="display:none;">
+                            <span class="field-label">Specify Relationship <span id="qp-crel-other-req" style="display:none; color:#dc2626;">*</span></span>
+                            <span class="input-wrap">
+                                <input type="text" name="contact_relationship_other" id="qp-contact-relationship-other" placeholder="e.g. Neighbor, Cousin, Co-worker">
+                            </span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">Contact Phone <span id="qp-cphone-req" style="display:none; color:#dc2626;">*</span></span>
+                            <span class="input-wrap">
+                                <input type="tel" name="contact_phone" id="qp-contact-phone" placeholder="09XXXXXXXXX" maxlength="11" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,11);">
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <script>
+                (function() {
+                    var chk = document.getElementById('qp-no-phone');
+                    var phWrap = document.getElementById('qp-phone-wrap');
+                    var phInput = document.getElementById('qp-phone');
+                    var cSection = document.getElementById('qp-contact-section');
+                    var cFirstReq = document.getElementById('qp-cfirst-req');
+                    var cLastReq = document.getElementById('qp-clast-req');
+                    var cRelReq = document.getElementById('qp-crel-req');
+                    var cRelOtherReq = document.getElementById('qp-crel-other-req');
+                    var cPhoneReq = document.getElementById('qp-cphone-req');
+                    var badge = document.getElementById('qp-contact-req-badge');
+                    var cFirst = document.getElementById('qp-contact-first-name');
+                    var cMiddle = document.getElementById('qp-contact-middle-name');
+                    var cLast = document.getElementById('qp-contact-last-name');
+                    var cRel = document.getElementById('qp-contact-relationship');
+                    var cRelOtherWrap = document.getElementById('qp-contact-rel-other-wrap');
+                    var cRelOther = document.getElementById('qp-contact-relationship-other');
+                    var cPhone = document.getElementById('qp-contact-phone');
+
+                    function updateQpRelOther() {
+                        if (!cRel || !cRelOtherWrap) return;
+                        var isOther = (cRel.value === 'Other');
+                        var isNoPhone = chk && chk.checked;
+                        cRelOtherWrap.style.display = isOther ? 'block' : 'none';
+                        if (cRelOther) {
+                            cRelOther.required = isOther && isNoPhone;
+                            if (!isOther) cRelOther.value = '';
+                        }
+                        if (cRelOtherReq) cRelOtherReq.style.display = (isOther && isNoPhone) ? 'inline' : 'none';
+                    }
+
+                    if (cRel) {
+                        cRel.addEventListener('change', updateQpRelOther);
+                    }
+
+                    if (chk) {
+                        chk.addEventListener('change', function() {
+                            if (this.checked) {
+                                if (phWrap) phWrap.style.display = 'none';
+                                if (phInput) { phInput.required = false; phInput.value = ''; }
+                                if (cSection) cSection.style.display = 'block';
+                                if (cFirstReq) cFirstReq.style.display = 'inline';
+                                if (cLastReq) cLastReq.style.display = 'inline';
+                                if (cRelReq) cRelReq.style.display = 'inline';
+                                if (cPhoneReq) cPhoneReq.style.display = 'inline';
+                                if (badge) badge.style.display = 'inline';
+                                if (cFirst) cFirst.required = true;
+                                if (cLast) cLast.required = true;
+                                if (cRel) cRel.required = true;
+                                if (cPhone) cPhone.required = true;
+                                updateQpRelOther();
+                            } else {
+                                if (phWrap) phWrap.style.display = 'block';
+                                if (phInput) phInput.required = true;
+                                if (cSection) cSection.style.display = 'none';
+                                if (cFirstReq) cFirstReq.style.display = 'none';
+                                if (cLastReq) cLastReq.style.display = 'none';
+                                if (cRelReq) cRelReq.style.display = 'none';
+                                if (cRelOtherReq) cRelOtherReq.style.display = 'none';
+                                if (cPhoneReq) cPhoneReq.style.display = 'none';
+                                if (badge) badge.style.display = 'none';
+                                if (cFirst) { cFirst.required = false; cFirst.value = ''; }
+                                if (cMiddle) cMiddle.value = '';
+                                if (cLast) { cLast.required = false; cLast.value = ''; }
+                                if (cRel) { cRel.required = false; cRel.value = ''; }
+                                if (cRelOtherWrap) cRelOtherWrap.style.display = 'none';
+                                if (cRelOther) { cRelOther.required = false; cRelOther.value = ''; }
+                                if (cPhone) { cPhone.required = false; cPhone.value = ''; }
+                            }
+                        });
+                    }
+                })();
+                </script>
 
             <?php elseif ($isCompleteReg || $isPatient): ?>
                 <?php
@@ -188,6 +336,9 @@ $subtitle = match (true) {
                 $nextMrn = ($modal === 'Edit patient' && !empty($patientRow[9]))
                     ? (string) $patientRow[9]
                     : db_next_mrn();
+                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $nextMrn, $m)) {
+                    $nextMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                }
 
                 $ptCountry       = (string) ($patientRow['country'] ?? 'Philippines');
                 $ptProvince      = (string) ($patientRow['province'] ?? 'Zamboanga del Sur');
@@ -274,43 +425,129 @@ $subtitle = match (true) {
                      ============================================== -->
                 <div id="reg-step-pane-2" class="reg-step-pane" style="display:none;">
                     <div style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:10px; padding:12px 16px; margin-bottom:16px;">
-                        <strong style="color:#1e40af; font-size:13.5px; display:block; margin-bottom:2px;">Step 2: Mobile Number Verification</strong>
+                        <strong style="color:#1e40af; font-size:13.5px; display:block; margin-bottom:2px;">Step 2: Mobile Number &amp; Contact Information</strong>
                         <p style="margin:0; font-size:12.5px; color:#1e3a8a;">
-                            Enter the patient's Philippine mobile number. A 6-digit OTP code will be sent to confirm ownership before issuing the hospital MRN. Email is not required here; patients may optionally add an email in their portal profile later.
+                            Enter the patient's Philippine mobile number for verification and portal access. If the patient does not own a mobile phone, check the option below to verify their identity in person and continue.
                         </p>
                     </div>
 
-                    <div class="form-grid" style="align-items:flex-start;">
-                        <label class="field" style="flex:1;">
-                            <span class="field-label">Mobile Number <span style="color:#dc2626;">*</span></span>
-                            <div style="display:flex; gap:8px;">
-                                <span class="input-wrap" style="flex:1;">
-                                    <input type="tel" name="phone" id="pt-phone-input" placeholder="09XXXXXXXXX" value="<?= e($ptPhone) ?>" maxlength="11" required oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,11);">
-                                </span>
-                                <button type="button" id="btn-pt-open-otp" class="btn btn-primary" style="height:42px; padding:0 16px; white-space:nowrap; display:inline-flex; align-items:center; gap:6px;">
-                                    <?= icon('card', 16) ?>
-                                    <span id="btn-pt-open-otp-text"><?= $ptPhoneVerified ? 'Re-verify via OTP' : 'Send OTP Code' ?></span>
-                                </button>
-                            </div>
-                            <small class="field-hint">Enter an 11-digit mobile number starting with 09 (e.g. 09171234567).</small>
+                    <!-- No Phone Number Checkbox -->
+                    <div style="margin-bottom:14px; padding:12px 14px; background:#fff8e6; border:1px solid #fde68a; border-radius:8px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600; color:#92400e; font-size:13px;">
+                            <input type="checkbox" name="no_phone" id="pt-no-phone-checkbox" value="1" <?= !empty($patientRow['no_phone']) ? 'checked' : '' ?> style="width:16px; height:16px;">
+                            <span>Patient has no phone number</span>
                         </label>
+                        <small style="display:block; margin-top:4px; font-size:11.5px; color:#b45309;">
+                            Check this box if the patient does not have a phone. Staff will verify identity in person via physical valid ID, and contact person details below become required.
+                        </small>
                     </div>
 
-                    <!-- Verified Status Card -->
-                    <div id="pt-verified-indicator" style="<?= $ptPhoneVerified ? 'display:block;' : 'display:none;' ?> margin-top:14px; padding:14px 16px; background:#f0fdf4; border:1px solid #86efac; border-radius:8px;">
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <span style="color:#16a34a; font-size:22px; font-weight:700;">✓</span>
-                            <div>
-                                <strong style="color:#15803d; font-size:13.5px; display:block;">Mobile Number Successfully Verified</strong>
-                                <span style="font-size:12.5px; color:#166534;" id="pt-verified-phone-label">Verified number: <strong><?= e($ptPhone) ?></strong> (SMS OTP confirmed)</span>
+                    <!-- In-person ID check indicator when No Phone is checked -->
+                    <div id="pt-no-phone-inperson-notice" style="display:none; margin-bottom:16px; padding:12px 14px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; color:#166534; font-size:12.5px;">
+                        <strong>✓ In-Person Identity Verification:</strong> Staff will verify the patient's identity in person via physical ID. The OTP step is skipped and the patient receives a permanent MRN. No portal account will be created.
+                    </div>
+
+                    <!-- Phone Input & OTP Group -->
+                    <div id="pt-phone-field-group">
+                        <div class="form-grid" style="align-items:flex-start;">
+                            <label class="field" style="flex:1;">
+                                <span class="field-label">Mobile Number <span style="color:#dc2626;">*</span></span>
+                                <div style="display:flex; gap:8px;">
+                                    <span class="input-wrap" style="flex:1;">
+                                        <input type="tel" name="phone" id="pt-phone-input" placeholder="09XXXXXXXXX" value="<?= e($ptPhone) ?>" maxlength="11" required oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,11);">
+                                    </span>
+                                    <button type="button" id="btn-pt-open-otp" class="btn btn-primary" style="height:42px; padding:0 16px; white-space:nowrap; display:inline-flex; align-items:center; gap:6px;">
+                                        <?= icon('card', 16) ?>
+                                        <span id="btn-pt-open-otp-text"><?= $ptPhoneVerified ? 'Re-verify via OTP' : 'Send OTP Code' ?></span>
+                                    </button>
+                                </div>
+                                <small class="field-hint">Enter an 11-digit mobile number starting with 09 (e.g. 09171234567).</small>
+                            </label>
+                        </div>
+
+                        <!-- Verified Status Card -->
+                        <div id="pt-verified-indicator" style="<?= $ptPhoneVerified ? 'display:block;' : 'display:none;' ?> margin-top:14px; padding:14px 16px; background:#f0fdf4; border:1px solid #86efac; border-radius:8px;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <span style="color:#16a34a; font-size:22px; font-weight:700;">✓</span>
+                                <div>
+                                    <strong style="color:#15803d; font-size:13.5px; display:block;">Mobile Number Successfully Verified</strong>
+                                    <span style="font-size:12.5px; color:#166534;" id="pt-verified-phone-label">Verified number: <strong><?= e($ptPhone) ?></strong> (SMS OTP confirmed)</span>
+                                </div>
                             </div>
+                        </div>
+
+                        <div id="pt-unverified-indicator" style="<?= $ptPhoneVerified ? 'display:none;' : 'display:block;' ?> margin-top:14px; padding:12px 16px; background:var(--gray-50); border:1px solid var(--gray-200); border-radius:8px;">
+                            <span style="font-size:12.5px; color:var(--gray-600);">
+                                Click <strong>Send OTP Code</strong> to open the verification modal and enter the 6-digit code.
+                            </span>
                         </div>
                     </div>
 
-                    <div id="pt-unverified-indicator" style="<?= $ptPhoneVerified ? 'display:none;' : 'display:block;' ?> margin-top:14px; padding:12px 16px; background:var(--gray-50); border:1px solid var(--gray-200); border-radius:8px;">
-                        <span style="font-size:12.5px; color:var(--gray-600);">
-                            Click <strong>Send OTP Code</strong> to open the verification modal and enter the 6-digit code.
-                        </span>
+                    <!-- Contact Person Section -->
+                    <div id="pt-contact-person-section" style="<?= !empty($patientRow['no_phone']) ? 'display:block;' : 'display:none;' ?> margin-top:18px; padding-top:16px; border-top:1px dashed var(--gray-300);">
+                        <strong style="font-size:13px; color:var(--navy-900); display:block; margin-bottom:4px;">
+                            Contact Person (for Notifications &amp; Reminders)
+                            <span id="pt-contact-required-badge" style="display:none; color:#dc2626; font-size:11.5px; margin-left:6px; font-weight:600;">(Required when patient has no phone)</span>
+                        </strong>
+                        <p style="font-size:11.5px; color:var(--gray-500); margin:0 0 12px;">
+                            This contact number is only for hospital notifications and appointment reminders. It must never be usable to log in or activate an account for the patient.
+                        </p>
+                        <div class="form-grid three-col">
+                            <label class="field">
+                                <span class="field-label">First Name <span id="pt-cfirst-req" style="display:none; color:#dc2626;">*</span></span>
+                                <span class="input-wrap">
+                                    <input type="text" name="contact_first_name" id="pt-contact-first-name" placeholder="First name" value="<?= e($patientRow['contact_first_name'] ?? '') ?>">
+                                </span>
+                            </label>
+                            <label class="field">
+                                <span class="field-label">Middle Name <small style="color:var(--gray-500); font-weight:normal;">(optional)</small></span>
+                                <span class="input-wrap">
+                                    <input type="text" name="contact_middle_name" id="pt-contact-middle-name" placeholder="Middle name" value="<?= e($patientRow['contact_middle_name'] ?? '') ?>">
+                                </span>
+                            </label>
+                            <label class="field">
+                                <span class="field-label">Last Name <span id="pt-clast-req" style="display:none; color:#dc2626;">*</span></span>
+                                <span class="input-wrap">
+                                    <input type="text" name="contact_last_name" id="pt-contact-last-name" placeholder="Last name" value="<?= e($patientRow['contact_last_name'] ?? '') ?>">
+                                </span>
+                            </label>
+                        </div>
+                        <div class="form-grid three-col" style="margin-top:12px;">
+                            <?php
+                            $cRelSaved = (string) ($patientRow['contact_relationship_base'] ?? ($patientRow['contact_relationship'] ?? ''));
+                            $cRelIsOther = (strcasecmp($cRelSaved, 'Other') === 0 || str_starts_with($cRelSaved, 'Other ('));
+                            $cRelOtherVal = (string) ($patientRow['contact_relationship_other'] ?? '');
+                            if ($cRelOtherVal === '' && preg_match('/^Other\s*\((.*)\)$/i', $cRelSaved, $mO)) {
+                                $cRelOtherVal = trim($mO[1]);
+                                $cRelSaved = 'Other';
+                            }
+                            ?>
+                            <label class="field">
+                                <span class="field-label">Relationship <span id="pt-crel-req" style="display:none; color:#dc2626;">*</span></span>
+                                <span class="input-wrap">
+                                    <select name="contact_relationship" id="pt-contact-relationship">
+                                        <option value="" disabled <?= empty($cRelSaved) ? 'selected' : '' ?> hidden>Select relationship</option>
+                                        <?php foreach (['Spouse', 'Parent', 'Child', 'Sibling', 'Guardian', 'Relative', 'Caregiver', 'Other'] as $rel): ?>
+                                            <option value="<?= $rel ?>" <?= ($cRelSaved === $rel || ($rel === 'Other' && $cRelIsOther)) ? 'selected' : '' ?>><?= $rel ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <?= icon('down', 16) ?>
+                                </span>
+                            </label>
+                            <label class="field" id="pt-contact-rel-other-wrap" style="<?= $cRelIsOther ? 'display:block;' : 'display:none;' ?>">
+                                <span class="field-label">Specify Relationship <span id="pt-crel-other-req" style="display:none; color:#dc2626;">*</span></span>
+                                <span class="input-wrap">
+                                    <input type="text" name="contact_relationship_other" id="pt-contact-relationship-other" placeholder="e.g. Neighbor, Cousin, Co-worker" value="<?= e($cRelOtherVal) ?>">
+                                </span>
+                            </label>
+                            <label class="field">
+                                <span class="field-label">Contact Phone Number <span id="pt-cphone-req" style="display:none; color:#dc2626;">*</span></span>
+                                <span class="input-wrap">
+                                    <input type="tel" name="contact_phone" id="pt-contact-phone" placeholder="09XXXXXXXXX" maxlength="11" value="<?= e($patientRow['contact_phone'] ?? '') ?>" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,11);">
+                                </span>
+                                <small class="field-hint">No OTP for this number.</small>
+                            </label>
+                        </div>
                     </div>
 
                     <input type="hidden" name="phone_verified" id="pt-phone-verified" value="<?= $ptPhoneVerified ? '1' : '0' ?>">
@@ -460,8 +697,11 @@ $subtitle = match (true) {
                                     <span style="color:var(--gray-600); font-weight:600;">Birthdate &amp; Sex:</span>
                                     <span style="color:var(--navy-900);" id="cfm-patient-dob-sex">—</span>
 
-                                    <span style="color:var(--gray-600); font-weight:600;">Verified Mobile:</span>
+                                    <span style="color:var(--gray-600); font-weight:600;">Mobile Number:</span>
                                     <span style="color:var(--teal-700); font-weight:700;" id="cfm-patient-phone">—</span>
+
+                                    <span style="color:var(--gray-600); font-weight:600; display:none;" id="cfm-contact-label">Contact Person:</span>
+                                    <span style="color:var(--navy-900); display:none;" id="cfm-patient-contact">—</span>
 
                                     <span style="color:var(--gray-600); font-weight:600;">Assigned MRN:</span>
                                     <code style="color:var(--teal-800); font-weight:700; font-size:13px;" id="cfm-patient-mrn"><?= e($nextMrn) ?></code>
@@ -471,7 +711,7 @@ $subtitle = match (true) {
                                 </div>
                             </div>
 
-                            <p style="margin:0 0 18px; font-size:12px; color:var(--gray-600);">
+                            <p id="cfm-confirm-note" style="margin:0 0 18px; font-size:12px; color:var(--gray-600);">
                                 Once confirmed, this permanent record will be stored in the hospital database and an activation confirmation SMS will be dispatched.
                             </p>
 
@@ -535,6 +775,82 @@ $subtitle = match (true) {
                     var btnCloseConfirmModal = document.getElementById('btn-close-confirm-modal');
                     var btnCancelConfirm = document.getElementById('btn-cancel-confirm');
                     var btnSubmitReg = document.getElementById('btn-submit-registration');
+
+                    var noPhoneCheckbox = document.getElementById('pt-no-phone-checkbox');
+                    var phoneFieldGroup = document.getElementById('pt-phone-field-group');
+                    var noPhoneNotice = document.getElementById('pt-no-phone-inperson-notice');
+                    var contactSection = document.getElementById('pt-contact-person-section');
+                    var contactReqBadge = document.getElementById('pt-contact-required-badge');
+                    var cFirstReq = document.getElementById('pt-cfirst-req');
+                    var cLastReq = document.getElementById('pt-clast-req');
+                    var cRelReq = document.getElementById('pt-crel-req');
+                    var cRelOtherReq = document.getElementById('pt-crel-other-req');
+                    var cPhoneReq = document.getElementById('pt-cphone-req');
+                    var contactFirstInput = document.getElementById('pt-contact-first-name');
+                    var contactMiddleInput = document.getElementById('pt-contact-middle-name');
+                    var contactLastInput = document.getElementById('pt-contact-last-name');
+                    var contactRelSelect = document.getElementById('pt-contact-relationship');
+                    var contactRelOtherWrap = document.getElementById('pt-contact-rel-other-wrap');
+                    var contactRelOtherInput = document.getElementById('pt-contact-relationship-other');
+                    var contactPhoneInput = document.getElementById('pt-contact-phone');
+
+                    function updatePtRelOther() {
+                        if (!contactRelSelect || !contactRelOtherWrap) return;
+                        var isOther = (contactRelSelect.value === 'Other');
+                        var isNoPhone = noPhoneCheckbox && noPhoneCheckbox.checked;
+                        contactRelOtherWrap.style.display = isOther ? 'block' : 'none';
+                        if (contactRelOtherInput) {
+                            contactRelOtherInput.required = isOther && isNoPhone;
+                            if (!isOther) contactRelOtherInput.value = '';
+                        }
+                        if (cRelOtherReq) cRelOtherReq.style.display = (isOther && isNoPhone) ? 'inline' : 'none';
+                    }
+
+                    if (contactRelSelect) {
+                        contactRelSelect.addEventListener('change', updatePtRelOther);
+                    }
+
+                    function updateNoPhoneState() {
+                        if (!noPhoneCheckbox) return;
+                        var hasNoPhone = noPhoneCheckbox.checked;
+                        if (phoneFieldGroup) phoneFieldGroup.style.display = hasNoPhone ? 'none' : 'block';
+                        if (noPhoneNotice) noPhoneNotice.style.display = hasNoPhone ? 'block' : 'none';
+                        if (contactSection) contactSection.style.display = hasNoPhone ? 'block' : 'none';
+                        if (phoneInput) {
+                            phoneInput.required = !hasNoPhone;
+                            if (hasNoPhone) phoneInput.value = '';
+                        }
+                        if (contactReqBadge) contactReqBadge.style.display = hasNoPhone ? 'inline' : 'none';
+                        if (cFirstReq) cFirstReq.style.display = hasNoPhone ? 'inline' : 'none';
+                        if (cLastReq) cLastReq.style.display = hasNoPhone ? 'inline' : 'none';
+                        if (cRelReq) cRelReq.style.display = hasNoPhone ? 'inline' : 'none';
+                        if (cPhoneReq) cPhoneReq.style.display = hasNoPhone ? 'inline' : 'none';
+                        if (contactFirstInput) {
+                            contactFirstInput.required = hasNoPhone;
+                            if (!hasNoPhone) contactFirstInput.value = '';
+                        }
+                        if (contactMiddleInput && !hasNoPhone) {
+                            contactMiddleInput.value = '';
+                        }
+                        if (contactLastInput) {
+                            contactLastInput.required = hasNoPhone;
+                            if (!hasNoPhone) contactLastInput.value = '';
+                        }
+                        if (contactRelSelect) {
+                            contactRelSelect.required = hasNoPhone;
+                            if (!hasNoPhone) contactRelSelect.value = '';
+                        }
+                        if (contactPhoneInput) {
+                            contactPhoneInput.required = hasNoPhone;
+                            if (!hasNoPhone) contactPhoneInput.value = '';
+                        }
+                        updatePtRelOther();
+                    }
+
+                    if (noPhoneCheckbox) {
+                        noPhoneCheckbox.addEventListener('change', updateNoPhoneState);
+                        updateNoPhoneState();
+                    }
 
                     function setTabState(tab, num, label, state) {
                         if (!tab || !num || !label) return;
@@ -725,6 +1041,44 @@ $subtitle = match (true) {
 
                     if (btnToStep3) {
                         btnToStep3.addEventListener('click', function () {
+                            var hasNoPhone = noPhoneCheckbox && noPhoneCheckbox.checked;
+                            if (hasNoPhone) {
+                                var cFirst = (contactFirstInput ? contactFirstInput.value.trim() : '');
+                                var cMiddle = (contactMiddleInput ? contactMiddleInput.value.trim() : '');
+                                var cLast = (contactLastInput ? contactLastInput.value.trim() : '');
+                                var cRel = (contactRelSelect ? contactRelSelect.value.trim() : '');
+                                var cRelOther = (contactRelOtherInput ? contactRelOtherInput.value.trim() : '');
+                                var cPhone = (contactPhoneInput ? contactPhoneInput.value.trim() : '');
+
+                                if (!cFirst) {
+                                    alert('Please enter the Contact Person first name.');
+                                    if (contactFirstInput) contactFirstInput.focus();
+                                    return;
+                                }
+                                if (!cLast) {
+                                    alert('Please enter the Contact Person last name.');
+                                    if (contactLastInput) contactLastInput.focus();
+                                    return;
+                                }
+                                if (!cRel) {
+                                    alert('Please select the Contact Person relationship.');
+                                    if (contactRelSelect) contactRelSelect.focus();
+                                    return;
+                                }
+                                if (cRel === 'Other' && !cRelOther) {
+                                    alert('Please specify the relationship for Contact Person.');
+                                    if (contactRelOtherInput) contactRelOtherInput.focus();
+                                    return;
+                                }
+                                if (!cPhone || cPhone.length < 11 || !cPhone.startsWith('09')) {
+                                    alert('Please enter an 11-digit mobile number starting with 09 for the Contact Person.');
+                                    if (contactPhoneInput) contactPhoneInput.focus();
+                                    return;
+                                }
+                                goToStep(3);
+                                return;
+                            }
+
                             var p = (phoneInput ? phoneInput.value.trim() : '');
                             if (!p || p.length < 11 || !p.startsWith('09')) {
                                 alert('Please enter an 11-digit mobile number starting with 09.');
@@ -802,12 +1156,43 @@ $subtitle = match (true) {
                             var cfmName = document.getElementById('cfm-patient-name');
                             var cfmDobSex = document.getElementById('cfm-patient-dob-sex');
                             var cfmPhone = document.getElementById('cfm-patient-phone');
+                            var cfmContactLabel = document.getElementById('cfm-contact-label');
+                            var cfmContact = document.getElementById('cfm-patient-contact');
                             var cfmAddr = document.getElementById('cfm-patient-address');
+                            var cfmNote = document.getElementById('cfm-confirm-note');
+
+                            var hasNoPhone = noPhoneCheckbox && noPhoneCheckbox.checked;
+                            var cFirst = (contactFirstInput ? contactFirstInput.value.trim() : '');
+                            var cMiddle = (contactMiddleInput ? contactMiddleInput.value.trim() : '');
+                            var cLast = (contactLastInput ? contactLastInput.value.trim() : '');
+                            var cRel = (contactRelSelect ? contactRelSelect.value.trim() : '');
+                            var cRelOther = (contactRelOtherInput ? contactRelOtherInput.value.trim() : '');
+                            var cPhone = (contactPhoneInput ? contactPhoneInput.value.trim() : '');
+
+                            var cFullName = cFirst + (cMiddle ? ' ' + cMiddle : '') + (cLast ? ' ' + cLast : '');
+                            var cFullRel = (cRel === 'Other' && cRelOther) ? 'Other (' + cRelOther + ')' : cRel;
 
                             if (cfmName) cfmName.textContent = fullName;
                             if (cfmDobSex) cfmDobSex.textContent = bd + ' · ' + sx;
-                            if (cfmPhone) cfmPhone.textContent = ph + ' (✓ SMS Verified)';
                             if (cfmAddr) cfmAddr.textContent = fullAddr;
+
+                            if (hasNoPhone) {
+                                if (cfmPhone) cfmPhone.innerHTML = '<span style="color:#b45309;">None (Patient has no phone) · In-person ID verified</span>';
+                                if (cfmContactLabel) cfmContactLabel.style.display = 'inline';
+                                if (cfmContact) {
+                                    cfmContact.style.display = 'inline';
+                                    cfmContact.textContent = cFullName + ' (' + cFullRel + ') · ' + cPhone;
+                                }
+                                if (cfmNote) cfmNote.textContent = 'Once confirmed, this permanent record will be stored in the hospital database with verified in-person ID. No portal account will be created (no phone number provided).';
+                            } else {
+                                if (cfmPhone) cfmPhone.textContent = ph + ' (✓ SMS Verified)';
+                                if (cfmContactLabel) cfmContactLabel.style.display = 'none';
+                                if (cfmContact) {
+                                    cfmContact.style.display = 'none';
+                                    cfmContact.textContent = '—';
+                                }
+                                if (cfmNote) cfmNote.textContent = 'Once confirmed, this permanent record will be stored in the hospital database and an activation confirmation SMS will be dispatched.';
+                            }
 
                             if (confirmModal) confirmModal.style.display = 'flex';
                         });
@@ -950,19 +1335,46 @@ $subtitle = match (true) {
                 $uLicense = $userRow[9] ?? '—';
                 $uDob     = (string) ($userRow[10] ?? '—');
                 $uPhone   = (string) ($userRow[11] ?? ($userRow['phone'] ?? '—'));
+                $uSex     = (string) ($userRow['sex'] ?? ($userRow[12] ?? ''));
+                $dash     = static fn ($v) => (trim((string) $v) === '' || $v === '—') ? '—' : (string) $v;
+                $uDobFmt  = (strtotime($uDob) !== false && $uDob !== '—') ? date('F j, Y', strtotime($uDob)) : '—';
+                $tone     = ['Active' => ['#dcfce7', '#15803d', 'Active'], 'Pending' => ['#fef3c7', '#b45309', 'Pending Activation'], 'Disabled' => ['#fee2e2', '#b91c1c', 'Deactivated']][$uStatus] ?? ['#dcfce7', '#15803d', $uStatus];
+                $detail   = static function (string $label, string $val): string {
+                    return '<div style="padding:12px 14px; background:#f8fafc; border:1px solid var(--gray-200); border-radius:8px;">'
+                        . '<span style="display:block; font-size:11px; text-transform:uppercase; letter-spacing:.4px; font-weight:700; color:var(--gray-500); margin-bottom:4px;">' . e($label) . '</span>'
+                        . '<strong style="font-size:14px; color:var(--navy-900); word-break:break-word;">' . e($val) . '</strong></div>';
+                };
                 ?>
-                <div class="panel" style="padding:16px; background:var(--teal-50); border:1px solid var(--teal-200); margin-bottom:16px;">
-                    <h3 style="margin:0 0 4px;">
-                        <?= e($uName) ?>
-                        <?php if ($uRole === 'Patient'): ?>
-                            (<code>MRN: <?= e($uId) ?></code>)
-                        <?php endif; ?>
-                    </h3>
-                    <p style="margin:0; font-size:13px; color:var(--gray-600);">Role: <strong><?= e($uRole) ?></strong> · Email: <?= e($uEmail) ?> · Phone: <?= e($uPhone) ?></p>
-                    <?php if ($uRole === 'Doctor'): ?>
-                        <p style="margin:6px 0 0; font-size:12.5px;">Department: <strong><?= e($uDept) ?></strong> · Specialty: <strong><?= e($uSpec) ?></strong> · PRC License: <code><?= e($uLicense) ?></code></p>
-                    <?php endif; ?>
+                <div style="display:flex; align-items:center; gap:16px; padding:18px; background:var(--teal-50); border:1px solid var(--teal-200); border-radius:12px; margin-bottom:18px;">
+                    <div style="width:56px; height:56px; border-radius:50%; background:var(--teal-600); color:#fff; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700; flex-shrink:0;">
+                        <?= e(initials((string) $uName, 2)) ?>
+                    </div>
+                    <div style="flex:1; min-width:0;">
+                        <h3 style="margin:0 0 6px; font-size:18px; color:var(--navy-900);">
+                            <?= e($uName) ?>
+                            <?php if ($uRole === 'Patient'): ?><code style="font-size:13px;">MRN: <?= e($uId) ?></code><?php endif; ?>
+                        </h3>
+                        <span style="display:inline-block; padding:3px 10px; border-radius:999px; background:#fff; border:1px solid var(--teal-300); color:var(--teal-800); font-size:12px; font-weight:700; margin-right:6px;"><?= e($uRole) ?></span>
+                        <span style="display:inline-block; padding:3px 10px; border-radius:999px; background:<?= $tone[0] ?>; color:<?= $tone[1] ?>; font-size:12px; font-weight:700;"><?= e($tone[2]) ?></span>
+                    </div>
                 </div>
+
+                <strong style="display:block; font-size:12.5px; color:var(--navy-900); text-transform:uppercase; margin-bottom:8px;">Contact &amp; Personal</strong>
+                <div class="form-grid" style="gap:12px; margin-bottom:16px;">
+                    <?= $detail('Email Address', $dash($uEmail)) ?>
+                    <?= $detail('Mobile Number', $dash($uPhone)) ?>
+                    <?= $detail('Birthdate', $uDobFmt) ?>
+                    <?= $detail('Sex', $dash($uSex)) ?>
+                </div>
+
+                <?php if ($uRole === 'Doctor'): ?>
+                    <strong style="display:block; font-size:12.5px; color:var(--navy-900); text-transform:uppercase; margin-bottom:8px;">Professional Details</strong>
+                    <div class="form-grid" style="gap:12px; margin-bottom:8px;">
+                        <?= $detail('Department', $dash($uDept)) ?>
+                        <?= $detail('Specialty', $dash($uSpec)) ?>
+                        <?= $detail('PRC License No.', $dash($uLicense)) ?>
+                    </div>
+                <?php endif; ?>
 
             <?php elseif ($isUser): ?>
                 <?php
@@ -974,8 +1386,17 @@ $subtitle = match (true) {
                 $uDob        = (string) ($userRow[10] ?? '');
                 $uSex        = (string) ($userRow['sex'] ?? ($userRow[12] ?? ''));
                 ?>
+                <?php $isEditUser = ($modal === 'Edit user'); ?>
                 <div class="form-grid">
-                    <?= select_field('Role *', 'role', ['Doctor', 'Staff', 'Cashier', 'Admin'], $currentRole, ['id' => 'user_role_select']) ?>
+                    <?php if ($isEditUser): ?>
+                        <label class="field">
+                            <span class="field-label">Role</span>
+                            <span class="input-wrap"><input type="text" value="<?= e($currentRole) ?>" readonly style="background:var(--gray-50);"></span>
+                            <input type="hidden" name="role" id="user_role_select" value="<?= e($currentRole) ?>">
+                        </label>
+                    <?php else: ?>
+                        <?= select_field('Role *', 'role', ['Doctor', 'Staff', 'Cashier', 'Admin'], $currentRole, ['id' => 'user_role_select']) ?>
+                    <?php endif; ?>
                     <?= field('Email Address *', 'email', 'employee@westmetro.ph', 'email', (string) ($userRow[1] ?? ''), ['required' => true]) ?>
                 </div>
                 <div class="form-grid three-col">
@@ -1029,6 +1450,12 @@ $subtitle = match (true) {
                         </span>
                     </label>
                 </div>
+                <?php if ($isEditUser): ?>
+                    <label class="field" style="margin-top:14px; display:block;">
+                        <span class="field-label">Reason for editing <span style="color:#dc2626;">*</span></span>
+                        <span class="input-wrap"><textarea name="reason" rows="3" minlength="5" required placeholder="State why these details are being changed (recorded in the audit log)" style="width:100%;"></textarea></span>
+                    </label>
+                <?php endif; ?>
                 <script>
                 (function() {
                     var roleSel = document.getElementById('user_role_select');

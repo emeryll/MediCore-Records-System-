@@ -111,10 +111,36 @@ $ptRecords = patient_medical_records($state, $ptName, (string) ($pt[8] ?? ''));
             </div>
             <div class="panel" style="padding:14px; background:#f8fafc;">
                 <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Mobile Number</span>
-                <strong style="font-size:14px; color:var(--navy-900); font-family:monospace;"><?= e($phone) ?></strong>
-                <?= $phVer && !$isProv ? badge('OTP Verified', 'success') : badge('Unverified', 'warning') ?>
+                <?php if (!empty($pt['no_phone']) || empty($phone) || $phone === '—'): ?>
+                    <strong style="font-size:14px; color:var(--gray-600);">None (No phone)</strong>
+                    <div style="margin-top:4px;"><?= badge('No account (no phone)', 'neutral') ?></div>
+                <?php else: ?>
+                    <strong style="font-size:14px; color:var(--navy-900); font-family:monospace;"><?= e($phone) ?></strong>
+                    <div><?= $phVer && !$isProv ? badge('OTP Verified', 'success') : badge('Unverified', 'warning') ?></div>
+                <?php endif; ?>
             </div>
         </div>
+
+        <?php if (!empty($pt['no_phone'])): ?>
+            <div class="panel" style="padding:16px; background:#f8fafc; border:1px solid #cbd5e1; border-radius:10px; margin-top:14px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                    <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--teal-800); letter-spacing:0.5px;">Emergency / Notification Contact Person</span>
+                    <?= badge('Required Contact', 'warning') ?>
+                </div>
+                <div style="font-size:14.5px; color:var(--navy-900);">
+                    <strong><?= e((string) ($pt['contact_name'] ?: 'None specified')) ?></strong>
+                    <?php if (!empty($pt['contact_relationship'])): ?>
+                        <span style="color:var(--gray-600); font-weight:600;"> (<?= e((string) $pt['contact_relationship']) ?>)</span>
+                    <?php endif; ?>
+                    <?php if (!empty($pt['contact_phone'])): ?>
+                        · <span style="font-family:monospace; font-weight:700; color:var(--teal-800); font-size:14px;"><?= e((string) $pt['contact_phone']) ?></span>
+                    <?php endif; ?>
+                </div>
+                <small style="display:block; margin-top:6px; font-size:11.5px; color:var(--gray-500); line-height:1.4;">
+                    This contact number is for notifications and appointment reminders only. It cannot be used to activate an online portal account or log in.
+                </small>
+            </div>
+        <?php endif; ?>
 
         <div class="panel" style="padding:14px; background:#f8fafc; margin-top:14px;">
             <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Residential Address</span>
@@ -127,6 +153,10 @@ $ptRecords = patient_medical_records($state, $ptName, (string) ($pt[8] ?? ''));
                 <strong>Created by:</strong> <?= e($createdBy) ?> on <?= e($createdAt) ?><br>
                 <?php if ($upgAt !== ''): ?>
                     <strong>Upgraded to Registered by:</strong> <?= e($upgBy ?: 'Staff') ?> on <?= e($upgAt) ?><br>
+                <?php endif; ?>
+                <?php if (!empty($pt['no_phone'])): ?>
+                    <strong>Phone Verification:</strong> Skipped (Patient has no phone) · <strong>Identity:</strong> Verified in-person via physical ID<br>
+                    <strong>Portal Account:</strong> <span style="color:var(--gray-600); font-weight:600;">No account (no phone)</span><br>
                 <?php endif; ?>
                 <strong>ID Checked:</strong> <?= $idChecked || !$isProv ? '✓ Yes' : 'Pending' ?> ·
                 <strong>Patient Consent:</strong> <?= $consent || !$isProv ? '✓ Signed' : 'Pending' ?>

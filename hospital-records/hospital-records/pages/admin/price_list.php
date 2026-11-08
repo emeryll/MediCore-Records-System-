@@ -7,7 +7,7 @@ $editId = trim((string) ($_GET['edit'] ?? ''));
 $showAdd = isset($_GET['add']);
 
 $allItems = $state['price_list'] ?? [];
-$cats     = ['All categories', 'Consultation', 'Lab & Diagnostics', 'Medication', 'Room Rate'];
+$cats     = ['All categories', 'Consultation', 'Lab & Diagnostics', 'Room Rate'];
 
 $filtered = array_values(array_filter($allItems, static function (array $it) use ($q, $cat): bool {
     if ($cat !== 'All categories' && strcasecmp($it['category'] ?? '', $cat) !== 0) {
@@ -28,7 +28,7 @@ if ($editId !== '') {
 }
 
 $toolbar = toolbar_open('price-list')
-    . search_box('Search service, lab test, medication, or room rate...', 'q', $q)
+    . search_box('Search service, lab test, or room rate...', 'q', $q)
     . '<div class="toolbar-right">'
     . select_field('', 'cat', $cats, $cat)
     . filter_button()
@@ -37,7 +37,7 @@ $toolbar = toolbar_open('price-list')
 ?>
 <?= page_title(
     'Hospital Price List',
-    'Manage standard Philippine Peso (₱) prices for consultation fees, lab tests, medications, and room rates so billing stays consistent across Doctor, Staff, and Cashier portals.',
+    'Manage standard Philippine Peso (₱) prices for consultation fees, lab tests, and room rates so billing stays consistent across Doctor, Staff, and Cashier portals.',
     button('Add price item', ['icon' => 'plus', 'href' => url(['page' => 'price-list', 'add' => 1])])
 ) ?>
 
@@ -55,7 +55,7 @@ $toolbar = toolbar_open('price-list')
             <input type="hidden" name="action" value="save_price_item">
             <input type="hidden" name="id" value="<?= e($editItem['id'] ?? '') ?>">
             <div class="form-grid three">
-                <?= select_field('Category *', 'category', ['Consultation', 'Lab & Diagnostics', 'Medication', 'Room Rate'], $editItem['category'] ?? 'Consultation') ?>
+                <?= select_field('Category *', 'category', ['Consultation', 'Lab & Diagnostics', 'Room Rate'], $editItem['category'] ?? 'Consultation') ?>
                 <?= field('Item / Service Name *', 'name', 'e.g. Complete blood count (CBC)', 'text', $editItem['name'] ?? '', ['required' => true]) ?>
                 <?= field('Standard Price (₱) *', 'price', '500.00', 'number', (string) ($editItem['price'] ?? '500'), ['required' => true]) ?>
             </div>

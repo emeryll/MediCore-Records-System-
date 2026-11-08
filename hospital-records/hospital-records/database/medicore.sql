@@ -70,7 +70,7 @@ CREATE TABLE patients (
         patient_id VARCHAR(20) NOT NULL UNIQUE,
         full_name VARCHAR(150) NOT NULL,
         birthdate VARCHAR(40) NOT NULL DEFAULT '—',
-        phone VARCHAR(40) NOT NULL DEFAULT '—',
+        phone VARCHAR(40) DEFAULT NULL,
         insurance_no VARCHAR(60) NOT NULL DEFAULT '—',
         avatar VARCHAR(10) NOT NULL DEFAULT 'PT',
         sex VARCHAR(30) NOT NULL DEFAULT 'Not specified',
@@ -84,7 +84,15 @@ CREATE TABLE patients (
         postal_code VARCHAR(20) NOT NULL DEFAULT '',
         phone_verified INT NOT NULL DEFAULT 0,
         status VARCHAR(30) NOT NULL DEFAULT 'Active',
-        created_at VARCHAR(40) NOT NULL
+        created_at VARCHAR(40) NOT NULL,
+        no_phone TINYINT(1) NOT NULL DEFAULT 0,
+        contact_name VARCHAR(150) DEFAULT NULL,
+        contact_relationship VARCHAR(80) DEFAULT NULL,
+        contact_phone VARCHAR(40) DEFAULT NULL,
+        contact_first_name VARCHAR(80) DEFAULT NULL,
+        contact_middle_name VARCHAR(80) DEFAULT NULL,
+        contact_last_name VARCHAR(80) DEFAULT NULL,
+        contact_relationship_other VARCHAR(80) DEFAULT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Dumping data for table `patients`

@@ -1,8 +1,7 @@
 <?php
 declare(strict_types=1);
 
-$q      = trim((string) ($_GET['q'] ?? ''));
-$excPt  = trim((string) ($_GET['exception_patient'] ?? ''));
+$q = trim((string) ($_GET['q'] ?? ''));
 
 $admissions = array_values(array_filter(
     $state['admissions'] ?? [],
@@ -11,26 +10,8 @@ $admissions = array_values(array_filter(
 ?>
 <?= page_title(
     'Discharge Billing Clearance',
-    'Mark an inpatient admission’s billing status as Cleared (or Exception with a documented reason) so Front Desk Staff can complete the discharge.'
+    'Discharge billing clearance can only be marked Cleared after processing full payment.'
 ) ?>
-
-<?php if ($excPt !== ''): ?>
-    <div class="panel" style="padding:20px 22px; margin-bottom:20px; border-color:var(--amber-border); background:var(--amber-bg);">
-        <h3 style="margin:0 0 6px; font-size:15px;">Grant Exception Clearance for <?= e($excPt) ?></h3>
-        <p style="font-size:12px; color:var(--gray-700); margin:0 0 12px;">Document the approved reason for releasing the patient prior to full cash settlement (e.g., signed promissory note, DSWD/MAIP guarantee letter, or corporate HMO guarantee).</p>
-        <form method="post" action="index.php" style="display:grid; gap:12px;">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="clear_discharge_billing">
-            <input type="hidden" name="patient" value="<?= e($excPt) ?>">
-            <input type="hidden" name="clearance_status" value="Exception">
-            <?= field('Documented Exception Reason *', 'reason', 'e.g. Approved Promissory Note #PN-2026-04 / DSWD Guarantee Letter', 'text', '', ['required' => true]) ?>
-            <div style="display:flex; justify-content:flex-end; gap:10px;">
-                <?= button('Cancel', ['variant' => 'secondary', 'href' => url(['page' => 'discharge-clearance'])]) ?>
-                <?= button('Confirm Exception Clearance', ['type' => 'submit', 'icon' => 'check']) ?>
-            </div>
-        </form>
-    </div>
-<?php endif; ?>
 
 <?= table_open(['Patient & MRN', 'Room / Bed & Ward', 'Admission Status', 'Current Bill Balance', 'Billing Clearance Status', 'Clearance Actions']) ?>
 <?php foreach ($admissions as $adm):
@@ -42,13 +23,15 @@ $admissions = array_values(array_filter(
     $cNotes = (string) ($adm[10] ?? '');
 
     // Find unpaid balance for this patient
-    $ptBal   = 0.0;
+    $ptBal    = 0.0;
     $ptBillNo = '';
     foreach ($state['bills'] ?? [] as $idx => $b) {
         $nb = normalize_bill_row($b, $idx);
         if (strcasecmp($nb['patient'], $ptName) === 0) {
-            $ptBal   += $nb['balance'];
-            $ptBillNo = $nb['bill_no'];
+            $ptBal += $nb['balance'];
+            if ($ptBillNo === '' || $nb['balance'] > 0) {
+                $ptBillNo = $nb['bill_no'];
+            }
         }
     }
 ?>
@@ -74,12 +57,20 @@ $admissions = array_values(array_filter(
                 <div class="muted" style="font-size:11px; margin-top:3px;"><?= e($cNotes) ?></div>
             <?php endif; ?>
         </td>
-        <td>
-            <div class="row-actions" style="gap:6px; flex-wrap:wrap;">
-                <?= post_button('Mark Cleared', 'clear_discharge_billing', ['patient' => $ptName, 'clearance_status' => 'Cleared', 'reason' => 'All inpatient charges verified and settled'], ['variant' => 'primary']) ?>
-                <?= button('Grant Exception', ['variant' => 'secondary', 'href' => url(['page' => 'discharge-clearance', 'exception_patient' => $ptName])]) ?>
-                <?php if ($ptBillNo !== '' && $ptBal > 0): ?>
-                    <?= button('Collect Payment', ['variant' => 'secondary', 'href' => url(['page' => 'process-payment', 'bill' => $ptBillNo])]) ?>
+        <td style="white-space:nowrap;">
+            <div class="appt-action-cell" style="display:inline-flex; align-items:center; gap:6px;">
+                <?php if ($ptBal > 0.009): ?>
+                    <!-- Patient has outstanding balance: MUST process payment first! -->
+                    <a class="btn btn-primary btn-sm btn-appt-action" href="<?= e(url(['page' => 'process-payment', 'bill' => $ptBillNo, 'patient' => $ptName])) ?>" title="Process payment before marking cleared">
+                        <?= icon('card', 14) ?><span>Process Payment (<?= e(format_money($ptBal)) ?>)</span>
+                    </a>
+                <?php elseif ($bClear !== 'Cleared'): ?>
+                    <!-- Payment has been processed and balance is zero: can now be marked cleared -->
+                    <?= post_button('Mark Cleared', 'clear_discharge_billing', ['patient' => $ptName, 'clearance_status' => 'Cleared', 'reason' => 'All inpatient charges verified and settled'], ['variant' => 'primary', 'class' => 'btn-sm btn-appt-action', 'icon' => 'check']) ?>
+                <?php else: ?>
+                    <span style="font-size:12px; color:var(--teal-800); font-weight:700; display:inline-flex; align-items:center; gap:4px;">
+                        <?= icon('check', 14) ?> Cleared
+                    </span>
                 <?php endif; ?>
             </div>
         </td>

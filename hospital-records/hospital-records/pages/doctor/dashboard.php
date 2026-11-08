@@ -23,7 +23,7 @@ $actions = '<div class="button-pair">'
     <?= stat_card('Pending lab orders', (string) count(array_filter($state['lab_results'], static fn ($r) => ($r[3] ?? '') === 'Pending')), 'Awaiting results', 'flask', 'amber') ?>
 </div>
 
-<div class="grid-two" style="display:grid; grid-template-columns: 1.4fr 1fr; gap:18px; align-items:start;">
+<div class="grid-two">
     <div class="panel">
         <div class="panel-head">
             <div>

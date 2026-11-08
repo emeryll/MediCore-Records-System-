@@ -11,7 +11,6 @@ $provCount    = count(array_filter($state['patients'], static fn ($p) => is_prov
 
 $actions = '<div class="button-pair">'
     . button('Register patient', ['variant' => 'secondary', 'icon' => 'patient', 'href' => url(['page' => 'patients', 'modal' => 'Register patient'])])
-    . button('Quick add', ['variant' => 'secondary', 'icon' => 'plus', 'href' => url(['page' => 'patients', 'modal' => 'Quick add provisional'])])
     . button('Book appointment', ['icon' => 'calendar', 'href' => url(['page' => 'book', 'step' => 1])])
     . '</div>';
 ?>
@@ -56,18 +55,20 @@ $actions = '<div class="button-pair">'
                     </div>
                 </div>
                 <?= badge($a[3], status_tone($a[3])) ?>
-                <div style="display:flex; align-items:center; gap:8px;">
+                <div class="appt-action-cell" style="display:inline-flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:nowrap;">
                     <?php if (in_array($a[3], ['Scheduled', 'Confirmed', 'Upcoming', 'Waiting'], true)): ?>
                         <?php if ($isProv): ?>
-                            <?= button('Complete Reg & Check In', [
-                                'variant' => 'primary',
-                                'href'    => url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Complete registration', 'patient' => $a[1], 'checkin_appt' => $idx]),
-                            ]) ?>
+                            <a class="btn btn-primary btn-sm btn-appt-action" href="<?= e(url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Complete registration', 'patient' => $a[1], 'checkin_appt' => $idx])) ?>">
+                                <?= icon('check', 13) ?>
+                                <span>Complete Reg &amp; Check In</span>
+                            </a>
                         <?php else: ?>
-                            <?= post_button('Check in', 'checkin_appointment', ['idx' => (string) $idx], ['variant' => 'secondary']) ?>
+                            <?= post_button('Check In', 'checkin_appointment', ['idx' => (string) $idx], ['variant' => 'primary', 'class' => 'btn-sm btn-appt-action', 'icon' => 'check']) ?>
                         <?php endif; ?>
                     <?php endif; ?>
-                    <a class="text-link" href="<?= e(url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Appointment details', 'appt' => $idx])) ?>">Details</a>
+                    <a class="btn btn-secondary btn-sm btn-appt-action" href="<?= e(url(['page' => 'appointments', 'view' => 'List', 'modal' => 'Appointment details', 'appt' => $idx])) ?>">
+                        <span>Details</span>
+                    </a>
                 </div>
             </div>
         <?php endforeach; ?>

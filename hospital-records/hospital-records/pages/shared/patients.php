@@ -37,7 +37,7 @@ if ($role === 'Doctor' && $q === '' && $dobFilter === '' && $phFilter === '') {
     }
 }
 
-$filtered = array_values(array_filter($allPatients, static function (array $p) use ($q, $dobFilter, $stFilter): bool {
+$filtered = array_values(array_filter($allPatients, static function (array $p) use ($q, $dobFilter, $phFilter, $stFilter): bool {
     $isProv    = is_provisional_patient($p);
     $regStatus = $isProv ? 'Provisional' : 'Registered';
     $mrn       = patient_mrn_display($p, '');
@@ -51,8 +51,24 @@ $filtered = array_values(array_filter($allPatients, static function (array $p) u
             return false;
         }
     }
+    if ($phFilter !== '') {
+        $ptPhone = preg_replace('/\D+/', '', (string) ($p[2] ?? ''));
+        $cleanFilter = preg_replace('/\D+/', '', $phFilter);
+        if ($cleanFilter !== '' && !str_contains($ptPhone, $cleanFilter)) {
+            return false;
+        }
+    }
     if ($q !== '') {
-        return row_matches([$p[0] ?? '', $mrn, $p[1] ?? '', $p[2] ?? '', $p[7] ?? '', $regStatus], $q);
+        return row_matches([
+            $p[0] ?? '',
+            $mrn,
+            $p[1] ?? '',
+            $p[2] ?? '',
+            $p[7] ?? '',
+            $p['contact_name'] ?? '',
+            $p['contact_phone'] ?? '',
+            $regStatus
+        ], $q);
     }
     return true;
 }));
@@ -62,11 +78,6 @@ $paged = paginate_rows($filtered, 10);
 $actionsHtml = '';
 if ($role === 'Staff') {
     $actionsHtml = '<div style="display:flex; gap:10px; flex-wrap:wrap;">'
-        . button('Quick add', [
-            'variant' => 'secondary',
-            'icon'    => 'plus',
-            'href'    => url(['page' => 'patients', 'modal' => 'Quick add provisional', 'q' => $q, 'dob' => $dobFilter]),
-        ])
         . button('Register patient', [
             'icon' => 'plus',
             'href' => url(['page' => 'patients', 'modal' => 'Register patient', 'q' => $q, 'dob' => $dobFilter]),
@@ -94,10 +105,11 @@ if ($role === 'Staff') {
 <?php
 $toolbar = toolbar_open('patients')
     . search_box('Search by name or MRN...', 'q', $q)
-    . '<div class="input-wrap" style="min-width:155px;"><input type="date" name="dob" value="' . e($dobFilter) . '" title="Filter by Birthdate" style="height:42px; padding:0 10px; border:1px solid var(--gray-200); border-radius:8px; font-size:13px;"></div>'
+    . '<div class="input-wrap" style="min-width:145px;"><input type="date" name="dob" value="' . e($dobFilter) . '" title="Filter by Birthdate" style="height:42px; padding:0 10px; border:1px solid var(--gray-200); border-radius:8px; font-size:13px;"></div>'
+    . '<div class="input-wrap" style="min-width:130px;"><input type="text" name="phone" value="' . e($phFilter) . '" placeholder="Phone..." title="Filter by Phone" style="height:42px; padding:0 10px; border:1px solid var(--gray-200); border-radius:8px; font-size:13px;"></div>'
     . select_field('', 'reg_status', ['All statuses', 'Registered', 'Provisional'], $stFilter)
     . filter_button('Search')
-    . (($q !== '' || $dobFilter !== '' || $stFilter !== 'All statuses')
+    . (($q !== '' || $dobFilter !== '' || $phFilter !== '' || $stFilter !== 'All statuses')
         ? '<a class="btn btn-ghost" href="' . e(url(['page' => 'patients'])) . '"><span>Reset</span></a>'
         : '')
     . toolbar_close();
@@ -114,12 +126,13 @@ echo table_open([
 ], $toolbar);
 
 foreach ($paged['rows'] as $p):
-    $isProv    = is_provisional_patient($p);
-    $regStatus = $isProv ? 'Provisional' : 'Registered';
-    $mrn       = patient_mrn_display($p, '');
-    $phVer     = !empty($p['phone_verified']);
-    $isStale   = is_stale_provisional($p);
-    $ptKey     = (string) ($p[8] ?? $p[0]);
+    $isProv     = is_provisional_patient($p);
+    $regStatus  = $isProv ? 'Provisional' : 'Registered';
+    $mrn        = patient_mrn_display($p, '');
+    $phVer      = !empty($p['phone_verified']);
+    $isStale    = is_stale_provisional($p);
+    $ptKey      = (string) ($p[8] ?? $p[0]);
+    $hasNoPhone = !empty($p['no_phone']) || empty($p[2]) || $p[2] === '—';
 ?>
     <tr>
         <td>
@@ -152,11 +165,16 @@ foreach ($paged['rows'] as $p):
         </td>
         <td><?= e((string) ($p[5] ?? '—')) ?></td>
         <td>
-            <div style="font-family:monospace; font-size:13px;"><?= e((string) $p[2]) ?></div>
-            <?php if ($isProv || !$phVer): ?>
-                <small style="color:var(--amber-700); font-size:11px;">Unverified</small>
+            <?php if ($hasNoPhone): ?>
+                <div style="color:var(--gray-500); font-size:12.5px;">— (No phone)</div>
+                <small style="display:inline-block; margin-top:2px; font-size:11px; font-weight:600; color:var(--gray-500);">No account (no phone)</small>
             <?php else: ?>
-                <small style="color:var(--teal-700); font-size:11px;">✓ OTP Verified</small>
+                <div style="font-family:monospace; font-size:13px;"><?= e((string) $p[2]) ?></div>
+                <?php if ($isProv || !$phVer): ?>
+                    <small style="color:var(--amber-700); font-size:11px;">Unverified</small>
+                <?php else: ?>
+                    <small style="color:var(--teal-700); font-size:11px;">✓ OTP Verified</small>
+                <?php endif; ?>
             <?php endif; ?>
         </td>
         <td style="max-width:210px; font-size:12.5px; color:var(--gray-600);">

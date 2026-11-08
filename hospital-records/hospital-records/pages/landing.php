@@ -242,5 +242,39 @@ declare(strict_types=1);
     </div>
 </footer>
 
+<script>
+(function () {
+    var root = document.documentElement;
+    var nav = document.querySelector('.landing-nav');
+    function onScroll() { if (nav) nav.classList.toggle('is-scrolled', window.scrollY > 8); }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+
+    if (!('IntersectionObserver' in window)) return;
+    root.classList.add('js-reveal');
+    var targets = [];
+    document.querySelectorAll('.landing-section').forEach(function (sec) {
+        sec.querySelectorAll('.landing-container > *').forEach(function (el) { targets.push(el); });
+        sec.querySelectorAll('[class*="-grid"] > *').forEach(function (el, i) {
+            el.style.setProperty('--reveal-delay', ((i % 4) * 120) + 'ms');
+            targets.push(el);
+        });
+    });
+    var footerEl = document.querySelector('.landing-footer-inner');
+    if (footerEl) targets.push(footerEl);
+    var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+            // Re-trigger on every scroll: reveal when entering, reset when leaving the viewport.
+            en.target.classList.toggle('is-visible', en.isIntersecting);
+        });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+    targets.forEach(function (el) {
+        if (el.classList.contains('reveal')) return;
+        el.classList.add('reveal');
+        io.observe(el);
+    });
+})();
+</script>
+
 </body>
 </html>

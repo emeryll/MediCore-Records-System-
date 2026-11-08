@@ -19,7 +19,11 @@ if (str_contains($identifier, 'Warning') || str_contains($identifier, '<br') || 
 }
 unset($_SESSION['login_user_id'], $_SESSION['login_identifier'], $_SESSION['login_phone']);
 
-$isSetPassword = !empty($_GET['set_password']) || !empty($_SESSION['force_pw_change_uid']);
+// Only treat as set-password view if explicitly requested in the query parameter
+$isSetPassword = !empty($_GET['set_password']);
+if (!$isSetPassword) {
+    unset($_SESSION['force_pw_change_uid'], $_SESSION['set_pw_error']);
+}
 $setPwUid      = (string) ($_GET['uid'] ?? ($_SESSION['force_pw_change_uid'] ?? ''));
 $setPwToken    = (string) ($_GET['token'] ?? '');
 $setPwError    = $_SESSION['set_pw_error'] ?? null;
@@ -27,6 +31,21 @@ unset($_SESSION['set_pw_error']);
 
 $isVerify = !$isSetPassword && (($_GET['reset_step'] ?? '') === 'verify');
 $isForgot = !$isSetPassword && !$isVerify && (!empty($_GET['forgot']) || (($_GET['step'] ?? '') === 'forgot'));
+if (!$isForgot && !$isVerify) {
+    unset(
+        $_SESSION['reset_info'],
+        $_SESSION['reset_error'],
+        $_SESSION['reset_sms_sim'],
+        $_SESSION['reset_otp_code'],
+        $_SESSION['reset_phone'],
+        $_SESSION['reset_email'],
+        $_SESSION['reset_user_id'],
+        $_SESSION['reset_verified_phone'],
+        $_SESSION['reset_verified_email'],
+        $_SESSION['reset_target_uid'],
+        $_SESSION['reset_sent']
+    );
+}
 ?>
 <!doctype html>
 <html lang="en">

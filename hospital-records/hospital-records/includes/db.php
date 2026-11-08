@@ -76,7 +76,7 @@ function db_init_schema(PDO $pdo, string $driver): void
         id {$autoInc},
         user_id VARCHAR(20) NOT NULL UNIQUE,
         username VARCHAR(100) NOT NULL UNIQUE,
-        email VARCHAR(150) NOT NULL UNIQUE,
+        email VARCHAR(150) DEFAULT NULL,
         password_hash VARCHAR(255) NOT NULL,
         full_name VARCHAR(150) NOT NULL,
         role VARCHAR(30) NOT NULL,
@@ -110,6 +110,62 @@ function db_init_schema(PDO $pdo, string $driver): void
             $pdo->exec("ALTER TABLE accounts ADD COLUMN {$colDef}");
         } catch (Throwable) {}
     }
+    try {
+        if ($driver === 'mysql') {
+            $pdo->exec("ALTER TABLE accounts MODIFY email VARCHAR(150) NULL DEFAULT NULL");
+        } elseif ($driver === 'sqlite') {
+            $cols = $pdo->query("PRAGMA table_info(accounts)")->fetchAll(PDO::FETCH_ASSOC);
+            $emailNotNull = false;
+            foreach ($cols as $c) {
+                if ($c['name'] === 'email' && !empty($c['notnull'])) {
+                    $emailNotNull = true;
+                    break;
+                }
+            }
+            if ($emailNotNull) {
+                $pdo->exec("PRAGMA foreign_keys=OFF");
+                $colNames = array_map(static fn($c) => (string) $c['name'], $cols);
+                $colList = implode(', ', array_map(static fn($n) => '"' . $n . '"', $colNames));
+                $pdo->exec("CREATE TABLE accounts_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id VARCHAR(20) NOT NULL UNIQUE,
+                    username VARCHAR(100) NOT NULL UNIQUE,
+                    email VARCHAR(150) DEFAULT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    full_name VARCHAR(150) NOT NULL,
+                    role VARCHAR(30) NOT NULL,
+                    user_role_label VARCHAR(40) NOT NULL DEFAULT 'Patient',
+                    status VARCHAR(20) NOT NULL DEFAULT 'Active',
+                    department VARCHAR(100) NOT NULL DEFAULT '',
+                    specialty VARCHAR(120) NOT NULL DEFAULT '',
+                    license_number VARCHAR(60) NOT NULL DEFAULT '',
+                    birthdate VARCHAR(40) NOT NULL DEFAULT '',
+                    last_login VARCHAR(60) NOT NULL DEFAULT 'Never',
+                    created_at VARCHAR(40) NOT NULL,
+                    phone VARCHAR(50) NOT NULL DEFAULT '',
+                    phone_verified INT NOT NULL DEFAULT 0,
+                    address TEXT,
+                    country VARCHAR(100) NOT NULL DEFAULT 'Philippines',
+                    province VARCHAR(100) NOT NULL DEFAULT '',
+                    city VARCHAR(100) NOT NULL DEFAULT '',
+                    barangay VARCHAR(100) NOT NULL DEFAULT '',
+                    street VARCHAR(255) NOT NULL DEFAULT '',
+                    postal_code VARCHAR(30) NOT NULL DEFAULT '',
+                    sex VARCHAR(30) NOT NULL DEFAULT 'Not specified',
+                    force_password_change INT NOT NULL DEFAULT 0,
+                    set_password_token VARCHAR(120) NOT NULL DEFAULT '',
+                    set_password_expires_at BIGINT NOT NULL DEFAULT 0
+                )");
+                $pdo->exec("INSERT INTO accounts_migrated ({$colList}) SELECT {$colList} FROM accounts");
+                $pdo->exec("DROP TABLE accounts");
+                $pdo->exec("ALTER TABLE accounts_migrated RENAME TO accounts");
+                $pdo->exec("PRAGMA foreign_keys=ON");
+            }
+        }
+    } catch (Throwable) {}
+    try {
+        $pdo->exec("UPDATE accounts SET email = NULL WHERE role = 'Patient' AND (email LIKE '%@patient.westmetro.local' OR email LIKE '%@medicore.local' OR email = '')");
+    } catch (Throwable) {}
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS roles (
         id {$autoInc},
@@ -125,7 +181,7 @@ function db_init_schema(PDO $pdo, string $driver): void
         patient_id VARCHAR(20) NOT NULL UNIQUE,
         full_name VARCHAR(150) NOT NULL,
         birthdate VARCHAR(40) NOT NULL DEFAULT '—',
-        phone VARCHAR(40) NOT NULL DEFAULT '—',
+        phone VARCHAR(40) DEFAULT NULL,
         insurance_no VARCHAR(60) NOT NULL DEFAULT '—',
         avatar VARCHAR(10) NOT NULL DEFAULT 'PT',
         sex VARCHAR(30) NOT NULL DEFAULT 'Not specified',
@@ -139,7 +195,11 @@ function db_init_schema(PDO $pdo, string $driver): void
         postal_code VARCHAR(20) NOT NULL DEFAULT '',
         phone_verified INT NOT NULL DEFAULT 0,
         status VARCHAR(30) NOT NULL DEFAULT 'Active',
-        created_at VARCHAR(40) NOT NULL
+        created_at VARCHAR(40) NOT NULL,
+        no_phone TINYINT(1) NOT NULL DEFAULT 0,
+        contact_name VARCHAR(150) DEFAULT NULL,
+        contact_relationship VARCHAR(80) DEFAULT NULL,
+        contact_phone VARCHAR(40) DEFAULT NULL
     )");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS departments (
@@ -221,6 +281,15 @@ function db_init_schema(PDO $pdo, string $driver): void
         "ALTER TABLE patients ADD COLUMN created_by VARCHAR(120) NOT NULL DEFAULT 'Staff'",
         "ALTER TABLE patients ADD COLUMN upgraded_by VARCHAR(120) NOT NULL DEFAULT ''",
         "ALTER TABLE patients ADD COLUMN upgraded_at VARCHAR(50) NOT NULL DEFAULT ''",
+        "ALTER TABLE patients MODIFY COLUMN phone VARCHAR(40) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN no_phone TINYINT(1) NOT NULL DEFAULT 0",
+        "ALTER TABLE patients ADD COLUMN contact_name VARCHAR(150) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN contact_relationship VARCHAR(80) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN contact_phone VARCHAR(40) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN contact_first_name VARCHAR(80) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN contact_middle_name VARCHAR(80) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN contact_last_name VARCHAR(80) NULL DEFAULT NULL",
+        "ALTER TABLE patients ADD COLUMN contact_relationship_other VARCHAR(80) NULL DEFAULT NULL",
         "ALTER TABLE admissions ADD COLUMN admission_id VARCHAR(30) NOT NULL DEFAULT ''",
         "ALTER TABLE admissions ADD COLUMN mrn VARCHAR(30) NOT NULL DEFAULT ''",
         "ALTER TABLE admissions ADD COLUMN department VARCHAR(100) NOT NULL DEFAULT 'Internal Medicine'",
@@ -245,6 +314,97 @@ function db_init_schema(PDO $pdo, string $driver): void
         } catch (Throwable) {
         }
     }
+
+    // Ensure patients table in SQLite has nullable phone column
+    try {
+        if ($driver === 'sqlite') {
+            $cols = $pdo->query("PRAGMA table_info(patients)")->fetchAll(PDO::FETCH_ASSOC);
+            $phoneNotNull = false;
+            foreach ($cols as $c) {
+                if ($c['name'] === 'phone' && !empty($c['notnull'])) {
+                    $phoneNotNull = true;
+                    break;
+                }
+            }
+            if ($phoneNotNull) {
+                $pdo->exec("PRAGMA foreign_keys=OFF");
+                $colNames = array_map(static fn($c) => (string) $c['name'], $cols);
+                $colList = implode(', ', array_map(static fn($n) => '"' . $n . '"', $colNames));
+                $pdo->exec("CREATE TABLE patients_migrated (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_id VARCHAR(20) NOT NULL UNIQUE,
+                    full_name VARCHAR(150) NOT NULL,
+                    birthdate VARCHAR(40) NOT NULL DEFAULT '—',
+                    phone VARCHAR(40) DEFAULT NULL,
+                    insurance_no VARCHAR(60) NOT NULL DEFAULT '—',
+                    avatar VARCHAR(10) NOT NULL DEFAULT 'PT',
+                    sex VARCHAR(30) NOT NULL DEFAULT 'Not specified',
+                    blood_type VARCHAR(30) NOT NULL DEFAULT 'Not specified',
+                    address VARCHAR(255) NOT NULL DEFAULT '—',
+                    country VARCHAR(100) NOT NULL DEFAULT 'Philippines',
+                    province VARCHAR(100) NOT NULL DEFAULT '',
+                    city VARCHAR(100) NOT NULL DEFAULT '',
+                    barangay VARCHAR(100) NOT NULL DEFAULT '',
+                    street VARCHAR(150) NOT NULL DEFAULT '',
+                    postal_code VARCHAR(20) NOT NULL DEFAULT '',
+                    phone_verified INT NOT NULL DEFAULT 0,
+                    status VARCHAR(30) NOT NULL DEFAULT 'Active',
+                    created_at VARCHAR(40) NOT NULL,
+                    no_phone TINYINT(1) NOT NULL DEFAULT 0,
+                    contact_name VARCHAR(150) DEFAULT NULL,
+                    contact_relationship VARCHAR(80) DEFAULT NULL,
+                    contact_phone VARCHAR(40) DEFAULT NULL,
+                    email VARCHAR(150) NOT NULL DEFAULT '',
+                    mrn VARCHAR(30) NOT NULL DEFAULT '',
+                    registration_status VARCHAR(30) NOT NULL DEFAULT 'Registered',
+                    first_name VARCHAR(80) NOT NULL DEFAULT '',
+                    middle_name VARCHAR(80) NOT NULL DEFAULT '',
+                    last_name VARCHAR(80) NOT NULL DEFAULT '',
+                    id_checked INT NOT NULL DEFAULT 0,
+                    consent_given INT NOT NULL DEFAULT 0,
+                    created_by VARCHAR(120) NOT NULL DEFAULT 'Staff',
+                    upgraded_by VARCHAR(120) NOT NULL DEFAULT '',
+                    upgraded_at VARCHAR(50) NOT NULL DEFAULT '',
+                    contact_first_name VARCHAR(80) NULL DEFAULT NULL,
+                    contact_middle_name VARCHAR(80) NULL DEFAULT NULL,
+                    contact_last_name VARCHAR(80) NULL DEFAULT NULL,
+                    contact_relationship_other VARCHAR(80) NULL DEFAULT NULL
+                )");
+                $pdo->exec("INSERT INTO patients_migrated ({$colList}) SELECT {$colList} FROM patients");
+                $pdo->exec("DROP TABLE patients");
+                $pdo->exec("ALTER TABLE patients_migrated RENAME TO patients");
+                $pdo->exec("PRAGMA foreign_keys=ON");
+            }
+        }
+    } catch (Throwable) {}
+
+    // Ensure all registered patients have consistent MRN format MRN-XXXX (not P-XXXX)
+    try {
+        $pList = $pdo->query("SELECT id, patient_id, mrn FROM patients WHERE mrn LIKE 'P-%' OR patient_id LIKE 'P-%'")->fetchAll(PDO::FETCH_ASSOC);
+        $updPt = $pdo->prepare("UPDATE patients SET mrn = :mrn, patient_id = :pid WHERE id = :id");
+        foreach ($pList as $ptRow) {
+            $rawMrn = (string) $ptRow['mrn'];
+            $rawPid = (string) $ptRow['patient_id'];
+            $cleanMrn = preg_match('/^P-0*(\d+)$/i', $rawMrn, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $rawMrn;
+            $cleanPid = preg_match('/^P-0*(\d+)$/i', $rawPid, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $rawPid;
+            if ($cleanMrn === '' || $cleanMrn === '—') {
+                $cleanMrn = $cleanPid;
+            }
+            $updPt->execute([':mrn' => $cleanMrn, ':pid' => $cleanPid, ':id' => $ptRow['id']]);
+        }
+    } catch (Throwable) {}
+
+    try {
+        $lList = $pdo->query("SELECT id, mrn, patient_id FROM patient_account_links WHERE mrn LIKE 'P-%' OR patient_id LIKE 'P-%'")->fetchAll(PDO::FETCH_ASSOC);
+        $updLink = $pdo->prepare("UPDATE patient_account_links SET mrn = :mrn, patient_id = :pid WHERE id = :id");
+        foreach ($lList as $lRow) {
+            $rawMrn = (string) $lRow['mrn'];
+            $rawPid = (string) $lRow['patient_id'];
+            $cleanMrn = preg_match('/^P-0*(\d+)$/i', $rawMrn, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $rawMrn;
+            $cleanPid = preg_match('/^P-0*(\d+)$/i', $rawPid, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $rawPid;
+            $updLink->execute([':mrn' => $cleanMrn, ':pid' => $cleanPid, ':id' => $lRow['id']]);
+        }
+    } catch (Throwable) {}
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS payments (
         id {$autoInc},
@@ -368,7 +528,7 @@ function db_init_schema(PDO $pdo, string $driver): void
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS phone_otps (
         id {$autoInc},
-        phone VARCHAR(50) NOT NULL,
+        phone VARCHAR(150) NOT NULL,
         patient_id VARCHAR(20) NOT NULL DEFAULT '',
         code_hash VARCHAR(255) NOT NULL,
         plain_code VARCHAR(10) NOT NULL DEFAULT '',
@@ -377,6 +537,47 @@ function db_init_schema(PDO $pdo, string $driver): void
         used INT NOT NULL DEFAULT 0,
         created_at INT NOT NULL
     )");
+    try {
+        if ($driver === 'mysql') {
+            $pdo->exec("ALTER TABLE phone_otps MODIFY phone VARCHAR(150) NOT NULL");
+        }
+    } catch (Throwable) {}
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS patient_account_links (
+        id {$autoInc},
+        account_uid VARCHAR(30) NOT NULL,
+        patient_id VARCHAR(30) NOT NULL,
+        mrn VARCHAR(30) NOT NULL,
+        patient_name VARCHAR(150) NOT NULL,
+        relationship_label VARCHAR(60) NOT NULL DEFAULT 'Self',
+        is_primary TINYINT(1) NOT NULL DEFAULT 0,
+        linked_at VARCHAR(40) NOT NULL,
+        linked_by VARCHAR(60) NOT NULL DEFAULT 'Self-Service'
+    )");
+    try {
+        $pdo->exec("CREATE UNIQUE INDEX uniq_acc_patient ON patient_account_links (account_uid, patient_id)");
+    } catch (Throwable) {}
+
+    // Auto-link existing patient accounts to their corresponding patient record if not already linked
+    try {
+        $pAccs = $pdo->query("SELECT user_id, full_name FROM accounts WHERE role = 'Patient'")->fetchAll(PDO::FETCH_ASSOC);
+        $insLink = $pdo->prepare("INSERT IGNORE INTO patient_account_links (account_uid, patient_id, mrn, patient_name, relationship_label, is_primary, linked_at, linked_by)
+            VALUES (:auid, :pid, :mrn, :pname, 'Me', 1, :lat, 'System Initial Migration')");
+        foreach ($pAccs as $pa) {
+            $uId = (string) $pa['user_id'];
+            $pQuery = $pdo->prepare("SELECT patient_id, mrn, full_name FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1");
+            $pQuery->execute([':pid' => strtoupper($uId)]);
+            if ($pRow = $pQuery->fetch(PDO::FETCH_ASSOC)) {
+                $insLink->execute([
+                    ':auid'  => $uId,
+                    ':pid'   => $pRow['patient_id'],
+                    ':mrn'   => $pRow['mrn'] ?: $pRow['patient_id'],
+                    ':pname' => $pRow['full_name'],
+                    ':lat'   => date('Y-m-d H:i:s'),
+                ]);
+            }
+        }
+    } catch (Throwable) {}
 }
 
 /** Migrate accounts & store from SQLite to MySQL once when MySQL starts up. */
@@ -496,9 +697,10 @@ function db_prefix_for_role(string $roleName): string
  */
 function db_generate_phone_otp(string $phone, string $patientId = '', string $purpose = 'verification'): array
 {
-    $cleanPhone = preg_replace('/[^0-9+]/', '', trim($phone));
+    $isEmail = str_contains($phone, '@');
+    $cleanPhone = $isEmail ? strtolower(trim($phone)) : preg_replace('/[^0-9+]/', '', trim($phone));
     if ($cleanPhone === '') {
-        return ['ok' => false, 'error' => 'Please provide a valid phone number.'];
+        return ['ok' => false, 'error' => $isEmail ? 'Please provide a valid email address.' : 'Please provide a valid phone number.'];
     }
     $code      = str_pad((string) random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
     $codeHash  = password_hash($code, PASSWORD_DEFAULT);
@@ -542,7 +744,8 @@ function db_generate_phone_otp(string $phone, string $patientId = '', string $pu
  */
 function db_verify_phone_otp(string $phone, string $code, string $purpose = 'verification'): array
 {
-    $cleanPhone = preg_replace('/[^0-9+]/', '', trim($phone));
+    $isEmail    = str_contains($phone, '@');
+    $cleanPhone = $isEmail ? strtolower(trim($phone)) : preg_replace('/[^0-9+]/', '', trim($phone));
     $cleanCode  = preg_replace('/[^0-9]/', '', trim($code));
     if (strlen($cleanCode) !== 6) {
         return ['ok' => false, 'error' => 'Please enter a valid 6-digit verification code.'];
@@ -550,7 +753,7 @@ function db_verify_phone_otp(string $phone, string $code, string $purpose = 'ver
 
     $pdo  = db();
     $now  = time();
-    $stmt = $pdo->prepare('SELECT * FROM phone_otps WHERE phone = :phone AND purpose = :purpose AND used = 0 ORDER BY id DESC LIMIT 5');
+    $stmt = $pdo->prepare('SELECT * FROM phone_otps WHERE LOWER(phone) = :phone AND purpose = :purpose AND used = 0 ORDER BY id DESC LIMIT 5');
     $stmt->execute([':phone' => $cleanPhone, ':purpose' => $purpose]);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -691,7 +894,8 @@ function db_create_account(array $input, bool $fromAdmin = false): array
     $pdo       = db();
     $userId    = strtoupper(trim((string) ($input['user_id'] ?? '')));
     $username  = strtolower(trim((string) ($input['username'] ?? '')));
-    $email     = strtolower(trim((string) ($input['email'] ?? '')));
+    $rawEmail  = isset($input['email']) && $input['email'] !== null ? trim((string) $input['email']) : '';
+    $email     = $rawEmail !== '' ? strtolower($rawEmail) : null;
     $password  = (string) ($input['password'] ?? '');
     $fullName  = trim((string) ($input['full_name'] ?? ''));
     $dept      = trim((string) ($input['department'] ?? ''));
@@ -736,8 +940,12 @@ function db_create_account(array $input, bool $fromAdmin = false): array
     if ($username === '') {
         $username = $fullName !== '' ? $fullName : $userId;
     }
-    if ($email === '') {
-        $email = strtolower($userId) . '@medicore.local';
+    if ($email === null || $email === '') {
+        if ($prefix !== 'P' && $role !== 'Patient') {
+            $email = strtolower($userId) . '@medicore.local';
+        } else {
+            $email = null;
+        }
     }
 
     $phone         = trim((string) ($input['phone'] ?? ''));
@@ -777,8 +985,13 @@ function db_create_account(array $input, bool $fromAdmin = false): array
     }
 
     // Check if username or email is already taken
-    $chkUser = $pdo->prepare('SELECT id, username, email FROM accounts WHERE LOWER(username) = :u OR (email != "" AND LOWER(email) = :e) LIMIT 1');
-    $chkUser->execute([':u' => strtolower($username), ':e' => strtolower($email)]);
+    if ($email !== null && $email !== '') {
+        $chkUser = $pdo->prepare('SELECT id, username, email FROM accounts WHERE LOWER(username) = :u OR (email IS NOT NULL AND email != "" AND LOWER(email) = :e) LIMIT 1');
+        $chkUser->execute([':u' => strtolower($username), ':e' => strtolower($email)]);
+    } else {
+        $chkUser = $pdo->prepare('SELECT id, username, email FROM accounts WHERE LOWER(username) = :u LIMIT 1');
+        $chkUser->execute([':u' => strtolower($username)]);
+    }
     if ($existing = $chkUser->fetch()) {
         if (strtolower((string) $existing['username']) === strtolower($username)) {
             if ($prefix === 'P') {
@@ -786,7 +999,7 @@ function db_create_account(array $input, bool $fromAdmin = false): array
             } else {
                 return ['error' => 'Username "' . $username . '" is already taken.'];
             }
-        } else {
+        } elseif ($email !== null && strtolower((string) ($existing['email'] ?? '')) === strtolower($email)) {
             return ['error' => 'Email "' . $email . '" is already registered.'];
         }
     }
@@ -1319,7 +1532,6 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
         $state['archive'] ?? [],
         static fn ($r) => $r[0] !== $archiveCode
     ));
-
     if (!is_array($payload)) {
         return $arc ?: ['subject_name' => $archiveCode, 'record_type' => 'Record'];
     }
@@ -1519,8 +1731,8 @@ function db_load_state(): array
     foreach ($stmt->fetchAll() as $p) {
         $pid       = (string) ($p['patient_id'] ?? '');
         $regStatus = (string) ($p['registration_status'] ?? '');
-        if ($regStatus === '') {
-            $regStatus = str_starts_with(strtoupper($pid), 'PROV-') ? 'Provisional' : 'Registered';
+        if ($regStatus === '' || str_starts_with(strtoupper($pid), 'PROV-') || stripos((string) ($p['address'] ?? ''), 'provisional') !== false) {
+            $regStatus = (str_starts_with(strtoupper($pid), 'PROV-') || stripos((string) ($p['address'] ?? ''), 'provisional') !== false) ? 'Provisional' : ($regStatus ?: 'Registered');
         }
 
         // Rule: Provisional accounts are only allowed until 30 days. After 30 days, auto-archive.
@@ -1553,10 +1765,17 @@ function db_load_state(): array
         }
 
         $mrn = trim((string) ($p['mrn'] ?? ''));
-        if ($regStatus === 'Provisional') {
+        if ($regStatus === 'Provisional' || str_starts_with(strtoupper($pid), 'PROV-')) {
             $mrn = '';
-        } elseif ($mrn === '') {
-            $mrn = str_starts_with(strtoupper($pid), 'PROV-') ? db_next_mrn() : $pid;
+            $regStatus = 'Provisional';
+        } else {
+            if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
+                $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            } elseif (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $pid, $m)) {
+                $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            } elseif ($mrn === '') {
+                $mrn = $pid;
+            }
         }
 
         $nameParts = explode(' ', trim((string) ($p['full_name'] ?? '')), 3);
@@ -1569,6 +1788,24 @@ function db_load_state(): array
             $mName = count($nameParts) === 3 ? $nameParts[1] : '';
         }
 
+        $cNameFull = (string) ($p['contact_name'] ?? '');
+        $cParts    = explode(' ', trim($cNameFull), 3);
+        $cfName    = (string) ($p['contact_first_name'] ?? '');
+        $cmName    = (string) ($p['contact_middle_name'] ?? '');
+        $clName    = (string) ($p['contact_last_name'] ?? '');
+        if ($cfName === '' && $clName === '' && $cNameFull !== '') {
+            $cfName = $cParts[0] ?? '';
+            $clName = count($cParts) === 3 ? $cParts[2] : ($cParts[1] ?? '');
+            $cmName = count($cParts) === 3 ? $cParts[1] : '';
+        }
+        $cRelRaw   = (string) ($p['contact_relationship'] ?? '');
+        $cRelOther = (string) ($p['contact_relationship_other'] ?? '');
+        $cRelBase  = $cRelRaw;
+        if ($cRelOther === '' && preg_match('/^Other\s*\((.*)\)$/i', $cRelRaw, $mOther)) {
+            $cRelBase  = 'Other';
+            $cRelOther = trim($mOther[1]);
+        }
+
         $patients[] = [
             $p['full_name'],
             $p['birthdate'],
@@ -1579,8 +1816,13 @@ function db_load_state(): array
             $p['blood_type'],
             $p['address'],
             $pid,
+            9                     => $mrn,
+            10                    => $regStatus,
+            11                    => $p['created_at'] ?? date('Y-m-d'),
             'mrn'                 => $mrn,
             'registration_status' => $regStatus,
+            'reg_status'          => $regStatus,
+            'patient_id'          => $pid,
             'first_name'          => $fName,
             'middle_name'         => $mName,
             'last_name'           => $lName,
@@ -1599,6 +1841,15 @@ function db_load_state(): array
             'created_at'          => $p['created_at'] ?? date('Y-m-d H:i:s'),
             'upgraded_by'         => $p['upgraded_by'] ?? '',
             'upgraded_at'         => $p['upgraded_at'] ?? '',
+            'no_phone'            => (int) ($p['no_phone'] ?? 0),
+            'contact_name'               => $cNameFull,
+            'contact_relationship'       => $cRelRaw,
+            'contact_phone'              => (string) ($p['contact_phone'] ?? ''),
+            'contact_first_name'         => $cfName,
+            'contact_middle_name'        => $cmName,
+            'contact_last_name'          => $clName,
+            'contact_relationship_base'  => $cRelBase,
+            'contact_relationship_other' => $cRelOther,
         ];
     }
 
@@ -1613,7 +1864,9 @@ function db_load_state(): array
                     || strcasecmp((string) $pt[0], (string) $u[0]) === 0) {
                     $pt[8] = $u[7];
                     if (empty($pt['mrn']) && ($pt['registration_status'] ?? 'Registered') === 'Registered') {
-                        $pt['mrn'] = $u[7];
+                        $pt['mrn'] = preg_match('/^(?:MRN|P)-?0*(\d+)$/i', (string) $u[7], $m)
+                            ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT)
+                            : (string) $u[7];
                     }
                     if ($uBdate !== '' && ($pt[1] === '' || $pt[1] === '—')) {
                         $pt[1] = $uBdate;
@@ -1624,6 +1877,9 @@ function db_load_state(): array
             }
             unset($pt);
             if (!$foundPt) {
+                $uMrn = preg_match('/^(?:MRN|P)-?0*(\d+)$/i', (string) $u[7], $m)
+                    ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT)
+                    : (string) $u[7];
                 array_unshift($patients, [
                     $u[0],
                     $uBdate !== '' ? $uBdate : '—',
@@ -1634,8 +1890,13 @@ function db_load_state(): array
                     'Not specified',
                     $u['address'] ?: '—',
                     $u[7],
-                    'mrn'                 => $u[7],
+                    9                     => $uMrn,
+                    10                    => 'Registered',
+                    11                    => date('Y-m-d'),
+                    'mrn'                 => $uMrn,
                     'registration_status' => 'Registered',
+                    'reg_status'          => 'Registered',
+                    'patient_id'          => $u[7],
                     'phone_verified'      => 1,
                     'status'              => 'Active',
                     'email'               => $u[1] ?? '',
@@ -1645,6 +1906,82 @@ function db_load_state(): array
             }
         }
     }
+
+    // Ensure all patients referenced in appointments, admissions, or medical records ALWAYS reflect in $patients
+    try {
+        $apptRows = $pdo->query('SELECT patient_name, patient_id FROM appointments WHERE patient_name IS NOT NULL AND patient_name != "" AND patient_name != "—"')->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($apptRows as $ap) {
+            $aName = trim((string) ($ap['patient_name'] ?? ''));
+            $aPid  = trim((string) ($ap['patient_id'] ?? ''));
+            if ($aName === '' || $aName === '—') {
+                continue;
+            }
+            $found = false;
+            foreach ($patients as $pt) {
+                if (strcasecmp((string) $pt[0], $aName) === 0
+                    || ($aPid !== '' && strcasecmp((string) ($pt[8] ?? ''), $aPid) === 0)
+                    || ($aPid !== '' && strcasecmp((string) ($pt['mrn'] ?? ''), $aPid) === 0)) {
+                    $found = true;
+                    break;
+                }
+            }
+            if (!$found) {
+                $userMatch = null;
+                foreach ($users as $u) {
+                    if (strcasecmp((string) $u[0], $aName) === 0) {
+                        $userMatch = $u;
+                        break;
+                    }
+                }
+                $isProv = str_starts_with(strtoupper($aPid), 'PROV-') || ($userMatch === null && !str_starts_with(strtoupper($aPid), 'MRN-') && !str_starts_with(strtoupper($aPid), 'P-'));
+                $mrn    = $isProv ? '' : ($aPid !== '' ? (str_starts_with(strtoupper($aPid), 'MRN-') ? $aPid : 'MRN-' . preg_replace('/[^0-9]/', '', $aPid)) : db_next_mrn());
+                $pid    = $aPid !== '' ? $aPid : ($isProv ? db_next_provisional_ref() : str_replace('MRN-', 'P-', $mrn));
+                $newPt  = [
+                    $aName,
+                    '—',
+                    '—',
+                    '—',
+                    function_exists('initials') ? initials($aName, 2) : 'PT',
+                    'Not specified',
+                    'Not specified',
+                    $isProv ? '— (Provisional phone-in record)' : '—',
+                    $pid,
+                    9                     => $mrn,
+                    10                    => $isProv ? 'Provisional' : 'Registered',
+                    11                    => date('Y-m-d'),
+                    'mrn'                 => $mrn,
+                    'registration_status' => $isProv ? 'Provisional' : 'Registered',
+                    'reg_status'          => $isProv ? 'Provisional' : 'Registered',
+                    'patient_id'          => $pid,
+                    'phone_verified'      => $isProv ? 0 : 1,
+                    'status'              => 'Active',
+                    'created_by'          => 'Staff',
+                    'created_at'          => date('Y-m-d H:i:s'),
+                ];
+                $patients[] = $newPt;
+                // Also insert into database table so it is permanently stored
+                try {
+                    $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, full_name, birthdate, phone, insurance_no, avatar, sex, blood_type, address, status, created_by, created_at) VALUES (:pid, :mrn, :reg, :fn, :bd, :ph, :in, :av, :sx, :bt, :ad, :st, :cb, :ca)')
+                        ->execute([
+                            ':pid' => $pid,
+                            ':mrn' => $mrn,
+                            ':reg' => $isProv ? 'Provisional' : 'Registered',
+                            ':fn'  => $aName,
+                            ':bd'  => '—',
+                            ':ph'  => '—',
+                            ':in'  => '—',
+                            ':av'  => function_exists('initials') ? initials($aName, 2) : 'PT',
+                            ':sx'  => 'Not specified',
+                            ':bt'  => 'Not specified',
+                            ':ad'  => $isProv ? '— (Provisional phone-in record)' : '—',
+                            ':st'  => 'Active',
+                            ':cb'  => 'Staff',
+                            ':ca'  => date('Y-m-d H:i:s'),
+                        ]);
+                } catch (Throwable) {}
+            }
+        }
+    } catch (Throwable) {}
 
     // 3. CRUD: departments, rooms, beds, price_list, doctor_schedules
     $departments = [];
@@ -1704,6 +2041,11 @@ function db_load_state(): array
         }
         unset($it);
     }
+    // Medication is no longer a price-list category: drop any stored/seeded medication items.
+    $priceList = array_values(array_filter(
+        (array) $priceList,
+        static fn ($it) => strcasecmp((string) ($it['category'] ?? ''), 'Medication') !== 0
+    ));
 
     $doctorSchedules = db_get_store('doctor_schedules');
     if (!is_array($doctorSchedules)) {
@@ -1741,6 +2083,7 @@ function db_load_state(): array
     $admittedRoomMap = [];
     foreach ($pdo->query('SELECT * FROM admissions ORDER BY id DESC')->fetchAll() as $adIdx => $ad) {
         $admId = !empty($ad['admission_id']) ? (string) $ad['admission_id'] : ('ADM-' . str_pad((string) (1001 + (int) ($ad['id'] ?? $adIdx)), 4, '0', STR_PAD_LEFT));
+        $cNotes = !empty($ad['clinical_notes_json']) ? (json_decode((string) $ad['clinical_notes_json'], true) ?: []) : [];
         $admissions[] = [
             0                   => $ad['patient_name'],
             1                   => $ad['room_number'],
@@ -1748,6 +2091,12 @@ function db_load_state(): array
             3                   => $ad['admitted_date'],
             4                   => $ad['doctor_name'],
             5                   => $ad['reason'],
+            6                   => $ad['status'] ?? 'Admitted',
+            7                   => $ad['billing_clearance'] ?? 'Pending',
+            8                   => $ad['mrn'] ?? '',
+            9                   => (string) ($ad['discharge_order'] ?? ''),
+            10                  => (string) ($ad['clearance_reason'] ?? ''),
+            11                  => $cNotes,
             'admission_id'      => $admId,
             'patient_name'      => $ad['patient_name'],
             'mrn'               => $ad['mrn'] ?? '',
@@ -1759,7 +2108,7 @@ function db_load_state(): array
             'doctor_name'       => $ad['doctor_name'],
             'reason'            => $ad['reason'],
             'status'            => $ad['status'] ?? 'Admitted',
-            'clinical_notes'    => !empty($ad['clinical_notes_json']) ? (json_decode((string) $ad['clinical_notes_json'], true) ?: []) : [],
+            'clinical_notes'    => $cNotes,
             'discharge_order'   => (string) ($ad['discharge_order'] ?? ''),
             'final_diagnosis'   => (string) ($ad['final_diagnosis'] ?? ''),
             'billing_clearance' => (string) ($ad['billing_clearance'] ?? 'Pending'),
@@ -2038,21 +2387,45 @@ function db_save_state(array $state): void
 
         // Patients
         $pdo->exec('DELETE FROM patients');
-        $insPt = $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, first_name, middle_name, last_name, full_name, birthdate, phone, email, insurance_no, avatar, sex, blood_type, address, country, province, city, barangay, street, postal_code, phone_verified, id_checked, consent_given, status, created_by, created_at, upgraded_by, upgraded_at) VALUES (:pid, :mrn, :reg, :fnm, :mnm, :lnm, :fn, :bd, :ph, :em, :in, :av, :sx, :bt, :ad, :co, :pr, :ci, :bg, :st, :pc, :pv, :idc, :con, :stt, :cb, :ca, :ub, :ua)');
+        $insPt = $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, first_name, middle_name, last_name, full_name, birthdate, phone, email, insurance_no, avatar, sex, blood_type, address, country, province, city, barangay, street, postal_code, phone_verified, id_checked, consent_given, status, created_by, created_at, upgraded_by, upgraded_at, no_phone, contact_name, contact_relationship, contact_phone, contact_first_name, contact_middle_name, contact_last_name, contact_relationship_other) VALUES (:pid, :mrn, :reg, :fnm, :mnm, :lnm, :fn, :bd, :ph, :em, :in, :av, :sx, :bt, :ad, :co, :pr, :ci, :bg, :st, :pc, :pv, :idc, :con, :stt, :cb, :ca, :ub, :ua, :np, :cn, :cr, :cp, :cfn, :cmn, :cln, :cro)');
         foreach (array_reverse($state['patients'] ?? []) as $idx => $p) {
-            $regSt = (string) ($p['registration_status'] ?? 'Registered');
-            $pid   = (string) ($p[8] ?? (($regSt === 'Provisional' ? 'PROV-' : 'MRN-') . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT)));
-            $mrn   = $regSt === 'Provisional' ? '' : (string) ($p['mrn'] ?? $pid);
+            $pid   = (string) ($p[8] ?? ($p['patient_id'] ?? ''));
+            $regSt = (string) ($p['registration_status'] ?? ($p['reg_status'] ?? ($p[10] ?? 'Registered')));
+            if (str_starts_with(strtoupper($pid), 'PROV-') || stripos((string) ($p[7] ?? ($p['address'] ?? '')), 'provisional') !== false || $regSt === 'Provisional') {
+                $regSt = 'Provisional';
+                if ($pid === '' || !str_starts_with(strtoupper($pid), 'PROV-')) {
+                    $pid = 'PROV-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT);
+                }
+                $mrn = '';
+            } else {
+                if ($pid === '') {
+                    $pid = 'MRN-' . str_pad((string) (1001 + $idx), 4, '0', STR_PAD_LEFT);
+                } elseif (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $pid, $m)) {
+                    $pid = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                }
+                $rawMrn = (string) ($p['mrn'] ?? $pid);
+                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $rawMrn, $m)) {
+                    $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                } else {
+                    $mrn = $rawMrn;
+                }
+            }
+            $fnParts = explode(' ', trim((string) ($p[0] ?? '')));
+            $fnm = !empty($p['first_name']) ? (string) $p['first_name'] : ($fnParts[0] ?? '');
+            $lnm = !empty($p['last_name']) ? (string) $p['last_name'] : (count($fnParts) > 1 ? end($fnParts) : '');
+            $mnm = !empty($p['middle_name']) ? (string) $p['middle_name'] : (count($fnParts) > 2 ? $fnParts[1] : '');
+            $noPhoneVal = !empty($p['no_phone']) ? 1 : 0;
+            $phoneVal   = $noPhoneVal ? null : (!empty($p[2]) && $p[2] !== '—' ? (string) $p[2] : null);
             $insPt->execute([
                 ':pid' => $pid,
                 ':mrn' => $mrn,
                 ':reg' => $regSt,
-                ':fnm' => $p['first_name'] ?? '',
-                ':mnm' => $p['middle_name'] ?? '',
-                ':lnm' => $p['last_name'] ?? '',
+                ':fnm' => $fnm,
+                ':mnm' => $mnm,
+                ':lnm' => $lnm,
                 ':fn'  => $p[0] ?? '—',
                 ':bd'  => $p[1] ?? '—',
-                ':ph'  => $p[2] ?? '—',
+                ':ph'  => $phoneVal,
                 ':em'  => $p['email'] ?? '',
                 ':in'  => $p[3] ?? '—',
                 ':av'  => $p[4] ?? 'PT',
@@ -2065,7 +2438,7 @@ function db_save_state(array $state): void
                 ':bg'  => $p['barangay'] ?? '',
                 ':st'  => $p['street'] ?? '',
                 ':pc'  => $p['postal_code'] ?? '',
-                ':pv'  => (int) ($p['phone_verified'] ?? 0),
+                ':pv'  => $noPhoneVal ? 0 : (int) ($p['phone_verified'] ?? 0),
                 ':idc' => (int) ($p['id_checked'] ?? 0),
                 ':con' => (int) ($p['consent_given'] ?? 0),
                 ':stt' => $p['status'] ?? 'Active',
@@ -2073,6 +2446,14 @@ function db_save_state(array $state): void
                 ':ca'  => $p['created_at'] ?? date('Y-m-d H:i:s'),
                 ':ub'  => $p['upgraded_by'] ?? '',
                 ':ua'  => $p['upgraded_at'] ?? '',
+                ':np'  => $noPhoneVal,
+                ':cn'  => !empty($p['contact_name']) ? (string) $p['contact_name'] : null,
+                ':cr'  => !empty($p['contact_relationship']) ? (string) $p['contact_relationship'] : null,
+                ':cp'  => !empty($p['contact_phone']) ? (string) $p['contact_phone'] : null,
+                ':cfn' => !empty($p['contact_first_name']) ? (string) $p['contact_first_name'] : null,
+                ':cmn' => !empty($p['contact_middle_name']) ? (string) $p['contact_middle_name'] : null,
+                ':cln' => !empty($p['contact_last_name']) ? (string) $p['contact_last_name'] : null,
+                ':cro' => !empty($p['contact_relationship_other']) ? (string) $p['contact_relationship_other'] : null,
             ]);
         }
 
@@ -2133,12 +2514,12 @@ function db_save_state(array $state): void
                 ':dt'  => $ad['admitted_date'] ?? ($ad[3] ?? date('M d, Y')),
                 ':dr'  => $ad['doctor_name'] ?? ($ad[4] ?? 'Unassigned'),
                 ':rs'  => $ad['reason'] ?? ($ad[5] ?? ''),
-                ':st'  => $ad['status'] ?? 'Admitted',
-                ':cn'  => json_encode($ad['clinical_notes'] ?? []),
-                ':do'  => $ad['discharge_order'] ?? '',
-                ':fd'  => $ad['final_diagnosis'] ?? '',
-                ':bc'  => $ad['billing_clearance'] ?? 'Pending',
-                ':cr'  => $ad['clearance_reason'] ?? '',
+                ':st'  => $ad['status'] ?? ($ad[6] ?? 'Admitted'),
+                ':cn'  => json_encode(!empty($ad['clinical_notes']) ? $ad['clinical_notes'] : (!empty($ad[11]) ? $ad[11] : [])),
+                ':do'  => $ad['discharge_order'] ?? ($ad[9] ?? ''),
+                ':fd'  => $ad['final_diagnosis'] ?? ($ad[5] ?? ''),
+                ':bc'  => $ad['billing_clearance'] ?? ($ad[7] ?? 'Pending'),
+                ':cr'  => $ad['clearance_reason'] ?? ($ad[10] ?? ''),
                 ':cb'  => $ad['cleared_by'] ?? '',
             ]);
         }
@@ -2343,6 +2724,7 @@ function db_save_state(array $state): void
 
         $pdo->commit();
     } catch (Throwable $e) {
+        error_log('db_save_state failed: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
         }
@@ -2407,4 +2789,192 @@ function db_find_account_by_id(string $userId): ?array
     }
 
     return null;
+}
+
+/**
+ * Find account by phone number.
+ */
+function db_find_account_by_phone(string $phone): ?array
+{
+    $clean = preg_replace('/[^0-9]/', '', $phone);
+    if ($clean === '' || strlen($clean) < 7) {
+        return null;
+    }
+    $last10 = substr($clean, -10);
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT * FROM accounts WHERE phone = :ph OR phone LIKE :p10 LIMIT 1');
+    $stmt->execute([
+        ':ph'  => $clean,
+        ':p10' => '%' . $last10,
+    ]);
+    if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        return $row;
+    }
+    // Also check session state if present
+    foreach ($_SESSION['state']['users'] ?? [] as $u) {
+        $uPh = preg_replace('/[^0-9]/', '', (string) ($u[11] ?? ($u[1] ?? '')));
+        if ($uPh !== '' && ($uPh === $clean || substr($uPh, -10) === $last10)) {
+            return [
+                'user_id'   => $u[7] ?? '',
+                'username'  => $u[1] ?? '',
+                'full_name' => $u[0] ?? '',
+                'role'      => $u[2] ?? 'Patient',
+                'status'    => $u[3] ?? 'Active',
+                'phone'     => $uPh,
+            ];
+        }
+    }
+    return null;
+}
+
+/**
+ * Retrieve all patients linked to a user account.
+ */
+function db_get_account_linked_patients(string $accountUid): array
+{
+    $pdo  = db();
+    $auid = strtoupper(trim($accountUid));
+    if ($auid === '') {
+        return [];
+    }
+    $stmt = $pdo->prepare('SELECT l.*, p.avatar, p.birthdate, p.sex, p.blood_type, p.status as patient_status
+        FROM patient_account_links l
+        LEFT JOIN patients p ON UPPER(p.patient_id) = UPPER(l.patient_id)
+        WHERE UPPER(l.account_uid) = :auid
+        ORDER BY l.is_primary DESC, l.id ASC');
+    $stmt->execute([':auid' => $auid]);
+    $links = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // If no links found but the account is a Patient, auto-link to their self record
+    if (empty($links)) {
+        $pQuery = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND no_phone = 0 AND registration_status = "Registered" LIMIT 1');
+        $pQuery->execute([':pid' => $auid]);
+        if ($pt = $pQuery->fetch(PDO::FETCH_ASSOC)) {
+            db_link_patient_to_account($auid, $pt['patient_id'], 'Me', true, 'Self-Service');
+            return db_get_account_linked_patients($auid);
+        }
+    }
+
+    return $links;
+}
+
+/**
+ * Check if a patient record is linked to an account.
+ */
+function db_is_patient_linked(string $accountUid, string $patientId): bool
+{
+    $auid = strtoupper(trim($accountUid));
+    $pid  = strtoupper(trim($patientId));
+    if ($auid === '' || $pid === '') {
+        return false;
+    }
+    if ($auid === $pid) {
+        return true;
+    }
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT id FROM patient_account_links
+        WHERE UPPER(account_uid) = :auid AND (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) LIMIT 1');
+    $stmt->execute([':auid' => $auid, ':pid' => $pid]);
+    return (bool) $stmt->fetchColumn();
+}
+
+/**
+ * Link a registered patient record to an account.
+ */
+function db_link_patient_to_account(string $accountUid, string $patientId, string $relationship = 'Dependent', bool $isPrimary = false, string $linkedBy = 'Patient Verification'): bool
+{
+    $pdo  = db();
+    $auid = strtoupper(trim($accountUid));
+    $pid  = strtoupper(trim($patientId));
+    if ($auid === '' || $pid === '') {
+        return false;
+    }
+
+    // Only Registered patients with an MRN can be linked (never provisional, never no_phone)
+    $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
+    $stmt->execute([':pid' => $pid]);
+    $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$pt) {
+        return false;
+    }
+
+    $isProv = str_starts_with(strtoupper($pt['patient_id']), 'PROV-') || stripos((string) ($pt['address'] ?? ''), 'provisional') !== false || ($pt['registration_status'] ?? '') === 'Provisional';
+    if ($isProv || !empty($pt['no_phone'])) {
+        return false;
+    }
+
+    $realPid  = (string) $pt['patient_id'];
+    $mrn      = (string) ($pt['mrn'] ?: $realPid);
+    $fullName = (string) $pt['full_name'];
+
+    // Check if already linked
+    $chk = $pdo->prepare('SELECT id FROM patient_account_links WHERE UPPER(account_uid) = :auid AND UPPER(patient_id) = :pid LIMIT 1');
+    $chk->execute([':auid' => $auid, ':pid' => strtoupper($realPid)]);
+    if ($chk->fetch()) {
+        return true;
+    }
+
+    $ins = $pdo->prepare('INSERT INTO patient_account_links (account_uid, patient_id, mrn, patient_name, relationship_label, is_primary, linked_at, linked_by)
+        VALUES (:auid, :pid, :mrn, :pname, :rel, :prm, :lat, :lby)');
+    return $ins->execute([
+        ':auid'  => $auid,
+        ':pid'   => $realPid,
+        ':mrn'   => $mrn,
+        ':pname' => $fullName,
+        ':rel'   => $relationship !== '' ? $relationship : 'Dependent',
+        ':prm'   => $isPrimary ? 1 : 0,
+        ':lat'   => date('Y-m-d H:i:s'),
+        ':lby'   => $linkedBy,
+    ]);
+}
+
+/**
+ * Find all registered patients (with MRN, no_phone=0, not provisional) with a given phone number.
+ */
+function db_get_registered_patients_by_phone(string $phone): array
+{
+    $clean = preg_replace('/[^0-9]/', '', $phone);
+    if ($clean === '' || strlen($clean) < 7) {
+        return [];
+    }
+    $last10 = substr($clean, -10);
+    $pdo = db();
+    $stmt = $pdo->prepare('SELECT * FROM patients
+        WHERE (phone = :ph OR phone LIKE :p10)
+          AND (no_phone = 0 OR no_phone IS NULL)
+          AND (status != "Archived" OR status IS NULL)
+        ORDER BY id ASC');
+    $stmt->execute([':ph' => $clean, ':p10' => '%' . $last10]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $out = [];
+    foreach ($rows as $r) {
+        $pid    = strtoupper(trim((string) ($r['patient_id'] ?? '')));
+        $mrn    = strtoupper(trim((string) ($r['mrn'] ?? '')));
+        $regSt  = (string) ($r['registration_status'] ?? '');
+        $isProv = str_starts_with($pid, 'PROV-') || stripos((string) ($r['address'] ?? ''), 'provisional') !== false || $regSt === 'Provisional' || $mrn === '' || $mrn === '-';
+        if (!$isProv && empty($r['no_phone'])) {
+            $out[] = $r;
+        }
+    }
+    return $out;
+}
+
+/**
+ * Find registered patients using this phone number who are NOT yet linked to the given account.
+ */
+function db_get_unlinked_patients_by_phone(string $phone, string $accountUid): array
+{
+    $allPts = db_get_registered_patients_by_phone($phone);
+    if (empty($allPts)) {
+        return [];
+    }
+    $unlinked = [];
+    foreach ($allPts as $p) {
+        $pid = (string) $p['patient_id'];
+        if (!db_is_patient_linked($accountUid, $pid)) {
+            $unlinked[] = $p;
+        }
+    }
+    return $unlinked;
 }

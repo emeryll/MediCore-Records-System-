@@ -37,7 +37,7 @@ $allSlots = ['08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:
     'Set your available clinic days, consultation time slots, and leave/blocked dates. These settings control which slots Patients and Front Desk Staff can book.'
 ) ?>
 
-<div class="grid-two" style="display:grid; grid-template-columns: 1.3fr 1fr; gap:20px; align-items:start;">
+<div class="grid-two">
     <form class="panel" method="post" action="index.php">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="save_doctor_schedule">
@@ -53,7 +53,7 @@ $allSlots = ['08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:
 
         <div class="field" style="margin-bottom:18px;">
             <span class="field-label">Available Days of the Week</span>
-            <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; margin-top:6px;">
+            <div class="sched-days-grid" style="margin-top:6px;">
                 <?php foreach ($allDays as $code => $fullDay):
                     $checked = in_array($code, $sched['days'] ?? [], true);
                 ?>
@@ -68,7 +68,7 @@ $allSlots = ['08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:
         <div class="field" style="margin-bottom:18px;">
             <span class="field-label">Consultation Time Slots</span>
             <small class="field-hint" style="display:block; margin-bottom:8px;">Check the specific 30-minute consultation slots open for patient &amp; staff booking.</small>
-            <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:8px;">
+            <div class="sched-slots-grid">
                 <?php foreach ($allSlots as $sl):
                     $sChecked = in_array($sl, $sched['slots'] ?? [], true);
                 ?>

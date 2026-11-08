@@ -15,8 +15,8 @@ return [
     'smtp_port'       => 587,
     'smtp_secure'     => 'tls', // 'tls' (port 587) or 'ssl' (port 465)
     'smtp_auth'       => true,
-    'smtp_user'       => 'evangelistameryll@gmail.com',
-    'smtp_pass'       => 'ktcfcpqjcgrlcgkw',
-    'from_email'      => 'evangelistameryll@gmail.com',
+    'smtp_user'       => 'ty202501591@wmsu.edu.ph',
+    'smtp_pass'       => 'vuclzdeswnsoxfcy', // Use your 16-character Google App Password
+    'from_email'      => 'ty202501591@wmsu.edu.ph',
     'from_name'       => 'West Metro Medical Center',
 ];

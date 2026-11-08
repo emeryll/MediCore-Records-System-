@@ -15,10 +15,11 @@ if ($role === 'Patient') {
 
 $fullName  = (string) ($acc['full_name'] ?? current_user_name($role));
 $displayId = $role === 'Patient' ? (patient_mrn_display($ptRec, $currentUid) ?: $currentUid) : $currentUid;
-$email     = (string) ($acc['email'] ?? ($ptRec['email'] ?? ''));
-if (str_ends_with($email, '@medicore.local')) {
+$email     = trim((string) ($acc['email'] ?? ($ptRec['email'] ?? '')));
+if (str_ends_with($email, '@medicore.local') || str_ends_with($email, '@patient.westmetro.local')) {
     $email = '';
 }
+$hasEmail  = ($email !== '');
 $phone     = (string) ($acc['phone'] ?? ($ptRec[2] ?? ''));
 $dob       = format_birthdate((string) ($acc['birthdate'] ?? ($ptRec[1] ?? '')));
 $age       = patient_age_label($dob, false, '—');
@@ -40,7 +41,7 @@ $pendingEmailOtp = (string) ($_SESSION['pending_profile_email_otp'] ?? '');
 ) ?>
 
 <!-- Main Profile Summary Card -->
-<div style="display:grid; grid-template-columns: 1fr; gap: 24px; max-width: 960px;">
+<div style="display:grid; grid-template-columns: 1fr; gap: 24px; width:100%;">
     <section class="panel">
         <div class="panel-head" style="align-items: center; border-bottom: 1px solid var(--gray-200); padding-bottom: 16px;">
             <div>
@@ -80,7 +81,7 @@ $pendingEmailOtp = (string) ($_SESSION['pending_profile_email_otp'] ?? '');
                 </button>
                 <button type="button" class="btn btn-primary" onclick="openProfileModal('modal-update-email')" style="display:inline-flex; align-items:center; gap:6px;">
                     <?= icon('mail', 16) ?>
-                    <span>Update Email</span>
+                    <span><?= $hasEmail ? 'Update Email' : 'Add Email' ?></span>
                 </button>
                 <button type="button" class="btn btn-secondary" onclick="openProfileModal('modal-change-password')" style="display:inline-flex; align-items:center; gap:6px;">
                     <?= icon('lock', 16) ?>
@@ -112,9 +113,9 @@ $pendingEmailOtp = (string) ($_SESSION['pending_profile_email_otp'] ?? '');
             <div class="panel" style="padding:14px 16px; background:#f8fafc; border-radius:8px;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                     <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500);">Email Address</span>
-                    <button type="button" onclick="openProfileModal('modal-update-email')" style="background:none; border:none; color:var(--teal-700); font-size:12px; font-weight:600; cursor:pointer; text-decoration:underline;">Update</button>
+                    <button type="button" onclick="openProfileModal('modal-update-email')" style="background:none; border:none; color:var(--teal-700); font-size:12px; font-weight:600; cursor:pointer; text-decoration:underline;"><?= $hasEmail ? 'Update' : 'Add' ?></button>
                 </div>
-                <strong style="font-size:15px; color:var(--navy-900);"><?= e($email ?: 'Not set') ?></strong>
+                <strong style="font-size:15px; color:var(--navy-900);"><?= e($hasEmail ? $email : 'Not set') ?></strong>
             </div>
         </div>
 
@@ -213,13 +214,13 @@ $pendingEmailOtp = (string) ($_SESSION['pending_profile_email_otp'] ?? '');
     </div>
 </div>
 
-<!-- 2. UPDATE EMAIL MODAL (STEP 1: Enter New Email) -->
+<!-- 2. ADD / UPDATE EMAIL MODAL (STEP 1: Enter Email) -->
 <div id="modal-update-email" class="modal-backdrop" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:9999; align-items:center; justify-content:center; padding:16px;">
     <div class="modal-card" style="background:#fff; border-radius:12px; max-width:500px; width:100%; box-shadow:0 20px 25px -5px rgba(0,0,0,0.2); overflow:hidden;">
         <div class="panel-head" style="padding:20px 24px; border-bottom:1px solid var(--gray-200); display:flex; justify-content:space-between; align-items:center;">
             <div>
-                <h3 style="margin:0; font-size:18px; color:var(--navy-900);">Update Email Address</h3>
-                <p style="margin:4px 0 0; font-size:13px; color:var(--gray-500);">Step 1: Enter your new email address to receive a verification code</p>
+                <h3 style="margin:0; font-size:18px; color:var(--navy-900);"><?= $hasEmail ? 'Update Email Address' : 'Add Email Address' ?></h3>
+                <p style="margin:4px 0 0; font-size:13px; color:var(--gray-500);"><?= $hasEmail ? 'Step 1: Enter your new email address to receive a verification code' : 'Step 1: Enter your email address to receive a verification code' ?></p>
             </div>
             <button type="button" onclick="closeProfileModal('modal-update-email')" style="background:none; border:none; font-size:22px; cursor:pointer; color:var(--gray-400); line-height:1;">&times;</button>
         </div>
@@ -228,17 +229,19 @@ $pendingEmailOtp = (string) ($_SESSION['pending_profile_email_otp'] ?? '');
             <?= csrf_field() ?>
             <input type="hidden" name="action" value="request_profile_email_otp">
 
-            <label class="field" style="margin-bottom:16px; display:block;">
-                <span class="field-label">Current Email Address</span>
-                <input type="text" readonly value="<?= e($email ?: 'None recorded') ?>" style="background:#f1f5f9; color:var(--gray-600); cursor:not-allowed;">
-            </label>
+            <?php if ($hasEmail): ?>
+                <label class="field" style="margin-bottom:16px; display:block;">
+                    <span class="field-label">Current Email Address</span>
+                    <input type="text" readonly value="<?= e($email) ?>" style="background:#f1f5f9; color:var(--gray-600); cursor:not-allowed;">
+                </label>
+            <?php endif; ?>
 
             <label class="field" style="margin-bottom:16px; display:block;">
-                <span class="field-label">New Email Address <span class="req-star" style="color:#dc2626; font-weight:700;">*</span></span>
+                <span class="field-label"><?= $hasEmail ? 'New Email Address' : 'Email Address' ?> <span class="req-star" style="color:#dc2626; font-weight:700;">*</span></span>
                 <span class="input-wrap">
                     <input type="email" name="new_email" placeholder="name@example.com" required autofocus>
                 </span>
-                <small class="field-hint">A 6-digit confirmation code will be sent to this email address.</small>
+                <small class="field-hint">A 6-digit confirmation code will be sent to this email address to prove it's actually yours.</small>
             </label>
 
             <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
@@ -255,32 +258,30 @@ $pendingEmailOtp = (string) ($_SESSION['pending_profile_email_otp'] ?? '');
         <div class="panel-head" style="padding:20px 24px; border-bottom:1px solid var(--gray-200); display:flex; justify-content:space-between; align-items:center;">
             <div>
                 <p class="eyebrow" style="color:var(--teal-700); font-weight:700; margin:0 0 4px;">Step 2 of 2 · Email Verification</p>
-                <h3 style="margin:0; font-size:18px; color:var(--navy-900);">Verify Code for <?= e($pendingEmail) ?></h3>
+                <h3 style="margin:0; font-size:18px; color:var(--navy-900);"><?= $hasEmail ? 'Verify New Email Address' : 'Verify Email Address' ?></h3>
             </div>
-            <a href="<?= e(url(['page' => 'profile'])) ?>" style="font-size:22px; color:var(--gray-400); text-decoration:none; line-height:1;">&times;</a>
+            <a href="<?= e(url(['page' => 'profile', 'cancel_pending_email' => 1])) ?>" style="font-size:22px; color:var(--gray-400); text-decoration:none; line-height:1;">&times;</a>
         </div>
 
         <form method="post" action="index.php" style="padding:24px;">
             <?= csrf_field() ?>
             <input type="hidden" name="action" value="confirm_profile_email">
 
-            <?php if ($pendingEmailOtp !== ''): ?>
-                <div style="background:#eff6ff; border:1px solid #93c5fd; color:#1d4ed8; padding:12px 16px; border-radius:8px; margin-bottom:18px; font-size:13.5px;">
-                    ✉️ <strong>Simulated Email to <?= e($pendingEmail) ?>:</strong> Your verification code is <strong style="font-size:17px; letter-spacing:3px; background:#fff; padding:2px 6px; border-radius:4px; border:1px solid #bfdbfe;"><?= e($pendingEmailOtp) ?></strong>
-                </div>
-            <?php endif; ?>
+            <div style="background:#f0fdfa; border:1px solid #5eead4; color:#0f766e; padding:12px 16px; border-radius:8px; margin-bottom:18px; font-size:13.5px;">
+                ✉️ A 6-digit verification code was sent to <strong><?= e($pendingEmail) ?></strong>. Enter it below to prove this email belongs to you.
+            </div>
 
             <label class="field" style="margin-bottom:16px; display:block;">
                 <span class="field-label">Enter 6-Digit Verification Code <span class="req-star" style="color:#dc2626; font-weight:700;">*</span></span>
                 <span class="input-wrap">
                     <input type="text" name="email_otp_code" placeholder="123456" maxlength="6" required value="<?= e($pendingEmailOtp) ?>" style="letter-spacing:6px; font-weight:700; font-size:20px; text-align:center;" oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 6);" autofocus>
                 </span>
-                <small class="field-hint">Enter the code sent to your new email inbox.</small>
+                <small class="field-hint">Enter the 6-digit code sent to <?= e($pendingEmail) ?>.</small>
             </label>
 
             <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
-                <a class="btn btn-secondary" href="<?= e(url(['page' => 'profile'])) ?>"><span>Cancel</span></a>
-                <button type="submit" class="btn btn-primary"><span>Verify &amp; Update Email</span></button>
+                <a class="btn btn-secondary" href="<?= e(url(['page' => 'profile', 'cancel_pending_email' => 1])) ?>"><span>Cancel</span></a>
+                <button type="submit" class="btn btn-primary"><span><?= $hasEmail ? 'Verify &amp; Update Email' : 'Verify &amp; Add Email' ?></span></button>
             </div>
         </form>
     </div>

@@ -4,17 +4,23 @@ declare(strict_types=1);
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+if (!empty($_SESSION['sim_messages']) && is_array($_SESSION['sim_messages'])) {
+    $_SESSION['sim_messages'] = array_values(array_filter($_SESSION['sim_messages'], static fn ($m) => ($m['channel'] ?? '') === 'SMS'));
+}
 if (empty($_SESSION['csrf'])) {
     $_SESSION['csrf'] = bin2hex(random_bytes(16));
 }
 
 const APP_NAME          = 'West Metro Medical Center';
 const APP_SHORT_NAME    = 'WMMC';
+const APP_FACILITY      = 'West Metro Medical Center';
 const HOSPITAL_SUBTITLE = 'Metro Pacific Health · Zamboanga City';
 const HOSPITAL_ADDRESS  = 'Veterans Avenue Extension, Tetuan, Zamboanga City';
 const HOSPITAL_PHONE    = '0968 873 7637 • 0998 978 9694';
 const HOSPITAL_WEBSITE  = 'new.westmetro.com.ph';
 const HOSPITAL_EMAIL    = 'records@westmetromedical.ph';
+const APP_ADDRESS       = HOSPITAL_ADDRESS;
+const APP_PHONE         = HOSPITAL_PHONE;
 
 require_once __DIR__ . '/wmmc_media.php';
 
@@ -58,18 +64,63 @@ function take_flash(): ?string
     return $m;
 }
 
-/** Store a simulated SMS or Email notification so it displays visibly in the UI for testing. */
-function push_sim_message(string $channel, string $recipient, string $message, string $linkUrl = '', string $linkLabel = ''): void
-{
+/** Store a simulated SMS or Email notification so it displays visibly in the UI for testing.
+ * Supports flexible calling signatures:
+ * - push_sim_message($channel, $recipient, $message, $linkUrl = '', $linkLabel = '')
+ * - push_sim_message($channel, $recipient, $subject, $body, $metaArray, $linkUrl, $linkLabel)
+ * - push_sim_message($channel, $recipient, $subject, $body, $linkUrl, $linkLabel)
+ */
+function push_sim_message(
+    string $channel,
+    string $recipient,
+    string $subjectOrMessage,
+    mixed $bodyOrLink = '',
+    mixed $metaOrLabel = '',
+    ?string $linkUrl = null,
+    ?string $linkLabel = null
+): void {
+    if (strtoupper(trim($channel)) === 'EMAIL') {
+        // Mockup email banners are disabled; emails must be sent directly to recipient inbox
+        return;
+    }
+
     if (!isset($_SESSION['sim_messages']) || !is_array($_SESSION['sim_messages'])) {
         $_SESSION['sim_messages'] = [];
     }
+
+    $channelName = strtoupper($channel) === 'EMAIL' ? 'Email' : 'SMS';
+    $messageText = '';
+    $finalLinkUrl   = '';
+    $finalLinkLabel = '';
+
+    if ($linkUrl !== null || is_array($metaOrLabel)) {
+        // ($channel, $recipient, $subject, $body, $metaArray, $linkUrl, $linkLabel)
+        $messageText    = trim((string) $bodyOrLink) ?: trim($subjectOrMessage);
+        $finalLinkUrl   = (string) ($linkUrl ?? '');
+        $finalLinkLabel = (string) ($linkLabel ?? 'Open Link');
+    } elseif (is_string($bodyOrLink) && (str_starts_with($bodyOrLink, 'http://') || str_starts_with($bodyOrLink, 'https://') || str_starts_with($bodyOrLink, 'index.php') || str_starts_with($bodyOrLink, '/'))) {
+        // ($channel, $recipient, $message, $linkUrl, $linkLabel)
+        $messageText    = trim($subjectOrMessage);
+        $finalLinkUrl   = $bodyOrLink;
+        $finalLinkLabel = is_string($metaOrLabel) && $metaOrLabel !== '' ? $metaOrLabel : 'Open Link';
+    } elseif (is_string($bodyOrLink) && $bodyOrLink !== '') {
+        $messageText = trim($bodyOrLink);
+        if (is_string($metaOrLabel) && (str_starts_with($metaOrLabel, 'http://') || str_starts_with($metaOrLabel, 'https://') || str_starts_with($metaOrLabel, 'index.php') || str_starts_with($metaOrLabel, '/'))) {
+            $finalLinkUrl   = $metaOrLabel;
+            $finalLinkLabel = (string) ($linkUrl ?? 'Open Link');
+        } elseif (is_string($metaOrLabel) && $metaOrLabel !== '') {
+            $finalLinkLabel = $metaOrLabel;
+        }
+    } else {
+        $messageText = trim($subjectOrMessage);
+    }
+
     array_unshift($_SESSION['sim_messages'], [
-        'channel'    => $channel, // 'SMS' or 'Email'
+        'channel'    => $channelName,
         'recipient'  => $recipient,
-        'message'    => $message,
-        'link_url'   => $linkUrl,
-        'link_label' => $linkLabel,
+        'message'    => $messageText,
+        'link_url'   => $finalLinkUrl,
+        'link_label' => $finalLinkLabel,
         'time'       => date('h:i A'),
     ]);
     $_SESSION['sim_messages'] = array_slice($_SESSION['sim_messages'], 0, 5);
@@ -94,6 +145,46 @@ function format_birthdate(?string $bdate): string
     }
     $ts = strtotime($bdate);
     return $ts !== false ? date('M d, Y', $ts) : $bdate;
+}
+
+/**
+ * Compare two birthdate strings for identical calendar day regardless of format.
+ */
+function match_birthdates(?string $date1, ?string $date2): bool
+{
+    $d1 = trim((string) $date1);
+    $d2 = trim((string) $date2);
+    if ($d1 === '' || $d2 === '' || $d1 === '—' || $d2 === '—' || $d1 === '-' || $d2 === '-') {
+        return false;
+    }
+    $ts1 = strtotime($d1);
+    $ts2 = strtotime($d2);
+    if ($ts1 === false || $ts2 === false) {
+        return false;
+    }
+    return date('Y-m-d', $ts1) === date('Y-m-d', $ts2);
+}
+
+/**
+ * Mask patient full name (e.g. "Meryll Joy Evangelista" -> "Meryll J. E.").
+ */
+function mask_patient_name(string $fullName): string
+{
+    $parts = preg_split('/\s+/', trim($fullName));
+    if (!$parts || count($parts) === 0) {
+        return '';
+    }
+    if (count($parts) === 1) {
+        return $parts[0];
+    }
+    $first = array_shift($parts);
+    $masked = [$first];
+    foreach ($parts as $p) {
+        if ($p !== '') {
+            $masked[] = mb_strtoupper(mb_substr($p, 0, 1)) . '.';
+        }
+    }
+    return implode(' ', $masked);
 }
 
 /** Calculate exact age in years from a birthdate string, or null if not set. */
@@ -132,13 +223,16 @@ function is_provisional_patient(?array $pt): bool
     if (!$pt) {
         return false;
     }
-    $regStatus = (string) ($pt['registration_status'] ?? '');
+    $regStatus = (string) ($pt['registration_status'] ?? ($pt['reg_status'] ?? ($pt[10] ?? '')));
     if (strcasecmp($regStatus, 'Provisional') === 0) {
         return true;
     }
-    $id  = strtoupper(trim((string) ($pt[8] ?? '')));
-    $mrn = strtoupper(trim((string) ($pt['mrn'] ?? '')));
-    if (str_starts_with($id, 'PROV-') && ($mrn === '' || $mrn === '—')) {
+    $id = strtoupper(trim((string) ($pt[8] ?? ($pt['patient_id'] ?? ''))));
+    if (str_starts_with($id, 'PROV-')) {
+        return true;
+    }
+    $addr = (string) ($pt[7] ?? ($pt['address'] ?? ''));
+    if (stripos($addr, 'provisional') !== false) {
         return true;
     }
     return false;
@@ -150,15 +244,20 @@ function patient_mrn_display(?array $pt, string $provisionalFallback = ''): stri
     if (!$pt || is_provisional_patient($pt)) {
         return $provisionalFallback;
     }
-    $mrn = trim((string) ($pt['mrn'] ?? ''));
-    if ($mrn !== '' && $mrn !== '—' && !str_starts_with(strtoupper($mrn), 'PROV-')) {
-        return $mrn;
+    $raw = trim((string) ($pt['mrn'] ?? ($pt[9] ?? ($pt[8] ?? ($pt['patient_id'] ?? '')))));
+    if ($raw === '' || $raw === '—' || str_starts_with(strtoupper($raw), 'PROV-')) {
+        return $provisionalFallback;
     }
-    $id = trim((string) ($pt[8] ?? ''));
-    if ($id !== '' && !str_starts_with(strtoupper($id), 'PROV-')) {
-        return $id;
+    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $raw, $m)) {
+        return 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
     }
-    return $provisionalFallback;
+    if (str_starts_with(strtoupper($raw), 'MRN-')) {
+        return $raw;
+    }
+    if (is_numeric($raw)) {
+        return 'MRN-' . str_pad($raw, 4, '0', STR_PAD_LEFT);
+    }
+    return $raw;
 }
 
 /** Is a provisional record stale (created more than $daysThreshold days ago and still not converted)? */
@@ -268,6 +367,23 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
     $sessionUid  = ($sessionRole === 'Patient' && !empty($_SESSION['user_id'])) ? trim((string) $_SESSION['user_id']) : '';
     $sessionName = ($sessionRole === 'Patient' && !empty($_SESSION['user_name'])) ? trim((string) $_SESSION['user_name']) : '';
 
+    // If logged in as Patient, check if an active linked patient is selected in the session
+    if ($sessionRole === 'Patient' && $sessionUid !== '') {
+        $activePtId = trim((string) ($_SESSION['active_patient_id'] ?? ''));
+        if ($activePtId !== '') {
+            $isValidLink = true;
+            if (function_exists('db_is_patient_linked')) {
+                $isValidLink = db_is_patient_linked($sessionUid, $activePtId);
+            }
+            if ($isValidLink) {
+                $sessionUid = $activePtId;
+                if (!empty($_SESSION['active_patient_name'])) {
+                    $sessionName = (string) $_SESSION['active_patient_name'];
+                }
+            }
+        }
+    }
+
     $queryName = trim((string) ($nameOrId ?? ''));
     $queryId   = strtoupper(trim((string) ($explicitPtId ?? '')));
 
@@ -333,10 +449,20 @@ function resolve_patient_identity(array $state, ?string $nameOrId = null, ?strin
         }
     }
 
-    $canonicalName = $ptRec[0] ?? (reset($names) ?: ($queryName !== '' ? $queryName : 'Patient'));
-    $canonicalId   = $queryId !== '' ? $queryId : (string) ($ptRec[8] ?? 'MRN-1001');
-    $isProv        = is_provisional_patient($ptRec);
-    $mrn           = $isProv ? '' : patient_mrn_display($ptRec, $canonicalId);
+    $canonicalName = $ptRec[0] ?? ($ptRec['name'] ?? (reset($names) ?: ($queryName !== '' ? $queryName : 'Patient')));
+
+    $isProv = is_provisional_patient($ptRec) || str_starts_with(strtoupper($queryId), 'PROV-');
+    if ($isProv) {
+        $provId = (string) ($ptRec[8] ?? ($ptRec['patient_id'] ?? ''));
+        if ($provId === '' || !str_starts_with(strtoupper($provId), 'PROV-')) {
+            $provId = str_starts_with(strtoupper($queryId), 'PROV-') ? $queryId : 'PROV-1001';
+        }
+        $canonicalId = $provId;
+        $mrn         = '';
+    } else {
+        $canonicalId = $queryId !== '' ? $queryId : (string) ($ptRec[8] ?? 'MRN-1001');
+        $mrn         = patient_mrn_display($ptRec, $canonicalId);
+    }
 
     return [
         'id'             => $canonicalId,
@@ -651,26 +777,39 @@ function store_proof_image(string $field, string $folder): array
 {
     $f = $_FILES[$field] ?? null;
     if (!$f || $f['error'] === UPLOAD_ERR_NO_FILE) {
-        return ['error' => 'Please choose an image to upload.'];
+        return ['error' => 'Please choose a file to upload.'];
     }
     if ($f['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($f['tmp_name'])) {
         return ['error' => 'Upload failed. Please try again.'];
     }
-    if ($f['size'] > 5 * 1024 * 1024) {
-        return ['error' => 'Image must be 5 MB or smaller.'];
+    if ($f['size'] > 10 * 1024 * 1024) {
+        return ['error' => 'File must be 10 MB or smaller.'];
     }
-    $info    = @getimagesize($f['tmp_name']);
-    $allowed = [IMAGETYPE_JPEG => 'jpg', IMAGETYPE_PNG => 'png', IMAGETYPE_GIF => 'gif', IMAGETYPE_WEBP => 'webp'];
-    if ($info === false || !isset($allowed[$info[2]])) {
-        return ['error' => 'Only JPG, PNG, GIF or WEBP images are allowed.'];
+    $ext = null;
+    $finfo = function_exists('finfo_open') ? finfo_open(FILEINFO_MIME_TYPE) : false;
+    $mime  = $finfo ? finfo_file($finfo, $f['tmp_name']) : '';
+    if ($finfo) {
+        finfo_close($finfo);
+    }
+    if ($mime === 'application/pdf' || str_ends_with(strtolower($f['name']), '.pdf')) {
+        $ext = 'pdf';
+    } else {
+        $info = @getimagesize($f['tmp_name']);
+        $allowed = [IMAGETYPE_JPEG => 'jpg', IMAGETYPE_PNG => 'png', IMAGETYPE_GIF => 'gif', IMAGETYPE_WEBP => 'webp'];
+        if ($info !== false && isset($allowed[$info[2]])) {
+            $ext = $allowed[$info[2]];
+        }
+    }
+    if (!$ext) {
+        return ['error' => 'Only JPG, PNG, WEBP images or PDF documents are allowed.'];
     }
     $dir = __DIR__ . '/../uploads/' . $folder;
     if (!is_dir($dir) && !mkdir($dir, 0775, true)) {
         return ['error' => 'Could not create the upload folder.'];
     }
-    $name = bin2hex(random_bytes(12)) . '.' . $allowed[$info[2]];
+    $name = bin2hex(random_bytes(12)) . '.' . $ext;
     if (!move_uploaded_file($f['tmp_name'], $dir . '/' . $name)) {
-        return ['error' => 'Could not save the uploaded image.'];
+        return ['error' => 'Could not save the uploaded file.'];
     }
     return ['path' => 'uploads/' . $folder . '/' . $name];
 }

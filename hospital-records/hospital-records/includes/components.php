@@ -156,26 +156,27 @@ function status_tone(string $status): string
     };
 }
 
-/** Render simulated SMS / Email notification banner when present in session. */
+/** Render simulated SMS notification banner when present in session. */
 function render_sim_banners(): string
 {
+    if (isset($_SESSION['sim_messages']) && is_array($_SESSION['sim_messages'])) {
+        // Strip out mockup emails; emails are sent directly to the inbox
+        $_SESSION['sim_messages'] = array_values(array_filter($_SESSION['sim_messages'], static fn ($m) => ($m['channel'] ?? '') === 'SMS'));
+    }
     $msgs = $_SESSION['sim_messages'] ?? [];
     if (empty($msgs)) {
         return '';
     }
+    $smsMsgs = $_SESSION['sim_messages'];
     $html = '<div style="display:flex; flex-direction:column; gap:8px; margin-bottom:16px;">';
-    foreach ($msgs as $idx => $m) {
-        $isSms = ($m['channel'] ?? 'SMS') === 'SMS';
-        $bg    = $isSms ? '#f0fdfa' : '#eff6ff';
-        $bdr   = $isSms ? '#99f6e4' : '#bfdbfe';
-        $txt   = $isSms ? '#0f766e' : '#1d4ed8';
-        $html .= '<div style="background:' . $bg . '; border:1px solid ' . $bdr . '; border-radius:10px; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13px; color:' . $txt . ';">';
-        $html .= '<div><strong>' . ($isSms ? '📱 Simulated SMS' : '✉️ Simulated Email') . ' to ' . e((string) ($m['recipient'] ?? '')) . ':</strong> ' . e((string) ($m['message'] ?? ''));
+    foreach ($smsMsgs as $idx => $m) {
+        $html .= '<div style="background:#f0fdfa; border:1px solid #99f6e4; border-radius:10px; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:13px; color:#0f766e;">';
+        $html .= '<div><strong>📱 Simulated SMS to ' . e((string) ($m['recipient'] ?? '')) . ':</strong> ' . e((string) ($m['message'] ?? ''));
         if (!empty($m['link_url'])) {
-            $html .= ' — <a href="' . e((string) $m['link_url']) . '" style="font-weight:700; text-decoration:underline; color:' . $txt . ';">' . e((string) ($m['link_label'] ?: 'Open Link')) . '</a>';
+            $html .= ' — <a href="' . e((string) $m['link_url']) . '" style="font-weight:700; text-decoration:underline; color:#0f766e;">' . e((string) ($m['link_label'] ?: 'Open Link')) . '</a>';
         }
         $html .= '</div>';
-        $html .= '<a href="' . e(url_with(['clear_sim' => 1])) . '" style="font-size:12px; color:' . $txt . '; opacity:0.75; text-decoration:none; white-space:nowrap;">Dismiss ×</a>';
+        $html .= '<a href="' . e(url_with(['clear_sim' => 1])) . '" style="font-size:12px; color:#0f766e; opacity:0.75; text-decoration:none; white-space:nowrap;">Dismiss ×</a>';
         $html .= '</div>';
     }
     $html .= '</div>';
@@ -197,11 +198,12 @@ function paginate_rows(array $allRows, int $perPage = 10, string $param = 'p'): 
     $label  = $total > 0 ? ($start . '–' . $end . ' of ' . $total) : '0 of 0';
 
     return [
-        'rows'  => $slice,
-        'label' => $label,
-        'page'  => $page,
-        'pages' => $pages,
-        'total' => $total,
+        'rows'   => $slice,
+        'label'  => $label,
+        'page'   => $page,
+        'pages'  => $pages,
+        'total'  => $total,
+        'offset' => $offset,
     ];
 }
 
@@ -273,6 +275,29 @@ function table_close(string $count = '1–10', bool $pager = true, mixed $totalP
         $html .= '</div>';
     }
     return $html . '</div></div>';
+}
+
+/** Standalone pagination bar (for card grids / list timelines outside standard table_open/table_close). */
+function pagination_bar(string $itemSingular, int $total, int $page, int $pages, string $param = 'p'): string
+{
+    $label = $total . ' ' . $itemSingular . ($total === 1 ? '' : 's');
+    $p = max(1, min(max(1, $pages), $page));
+    $html = '<div class="pagination"><span>Showing ' . e($label) . '</span>';
+    if ($pages > 1) {
+        $html .= '<div>';
+        $html .= $p <= 1
+            ? '<button disabled>Previous</button>'
+            : '<a href="' . e(url_with([$param => $p - 1])) . '">Previous</a>';
+        for ($n = 1; $n <= $pages; $n++) {
+            $html .= '<a class="' . ($n === $p ? 'current' : '') . '" href="' . e(url_with([$param => $n])) . '">' . $n . '</a>';
+        }
+        $html .= $p >= $pages
+            ? '<button disabled>Next</button>'
+            : '<a href="' . e(url_with([$param => $p + 1])) . '">Next</a>';
+        $html .= '</div>';
+    }
+    $html .= '</div>';
+    return $html;
 }
 
 function filtered_empty(string $message): string

@@ -1,13 +1,17 @@
 <?php
 declare(strict_types=1);
 
-$actError = $_SESSION['register_error'] ?? null;
-$actStep  = (int) ($_GET['step'] ?? ($_SESSION['act_step'] ?? 1));
-$actPhone = (string) ($_GET['phone'] ?? ($_SESSION['act_phone'] ?? ''));
-$actMrn   = (string) ($_SESSION['act_mrn'] ?? '');
-$actName  = (string) ($_SESSION['act_name'] ?? '');
-$actCode  = (string) ($_SESSION['act_otp_code'] ?? '');
-unset($_SESSION['register_error']);
+$actError = $_SESSION['activate_error'] ?? ($_SESSION['register_error'] ?? null);
+$actStep  = (int) ($_GET['step'] ?? ($_SESSION['activate_step'] ?? ($_SESSION['act_step'] ?? 1)));
+$actPhone = (string) ($_GET['phone'] ?? ($_SESSION['activate_phone'] ?? ($_SESSION['act_phone'] ?? '')));
+$actPts   = $_SESSION['activate_pts'] ?? [];
+$hasExistingAccount = !empty($_SESSION['activate_has_existing_account']);
+$unlinkedPts        = $_SESSION['activate_unlinked_patients'] ?? $actPts;
+$actCode  = (string) ($_SESSION['activate_otp'] ?? ($_SESSION['act_otp_code'] ?? ''));
+if ($actStep > 1 && $actPhone === '') {
+    $actStep = 1;
+}
+unset($_SESSION['activate_error'], $_SESSION['register_error']);
 ?>
 <!doctype html>
 <html lang="en">
@@ -55,13 +59,15 @@ unset($_SESSION['register_error']);
             <p class="eyebrow">Step <?= $actStep ?> of 3 · Patient Portal Activation</p>
             <h2><?= match ($actStep) {
                 2 => 'Verify your 6-digit OTP',
-                3 => 'Create your password',
+                3 => ($hasExistingAccount ? 'Link patient profile to account' : 'Confirm profiles & create password'),
                 default => 'Activate patient account',
             } ?></h2>
             <p class="login-intro">
                 <?= match ($actStep) {
-                    2 => 'Enter the 6-digit verification code sent to ' . e($actPhone) . ' for ' . e($actName) . ' (' . e($actMrn) . ').',
-                    3 => 'Phone verified for ' . e($actName) . ' (' . e($actMrn) . '). Choose a password to complete activation.',
+                    2 => 'Enter the 6-digit verification code sent to ' . e($actPhone) . '.',
+                    3 => ($hasExistingAccount
+                        ? 'An account already exists for ' . e($actPhone) . '. Enter the patient\'s birthdate below to link the profile without needing a new password.'
+                        : 'Phone verified for ' . e($actPhone) . '. Enter the registered birthdate for each profile to confirm identity, then create your password.'),
                     default => 'Enter the mobile number you registered with Front Desk Staff. Only fully registered patients with an assigned MRN can activate an account.',
                 } ?>
             </p>
@@ -115,15 +121,64 @@ unset($_SESSION['register_error']);
                     </div>
                 </form>
 
+            <?php elseif ($hasExistingAccount): ?>
+                <!-- CASE 2: Account already exists for this phone number -> verify birthdate and link (NO PASSWORD) -->
+                <form method="post" action="index.php">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="activate_link_existing">
+                    <div class="panel" style="padding:12px 14px; background:#f0fdfa; border:1px solid #99f6e4; color:#0f766e; border-radius:8px; margin-bottom:16px; font-size:13.5px;">
+                        <?= icon('shield', 18) ?> An online portal account is already active for <strong><?= e($actPhone) ?></strong>. Enter the registered birthdate below to link the new profile to your existing account.
+                    </div>
+                    <?php foreach ($unlinkedPts as $uPt): ?>
+                        <div class="panel" style="padding:14px; background:#fff; border:1px solid var(--gray-200); border-radius:8px; margin-bottom:14px;">
+                            <input type="hidden" name="patient_id" value="<?= e($uPt['patient_id']) ?>">
+                            <div style="margin-bottom:10px;">
+                                <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--teal-800);">Registered Patient</span>
+                                <div style="font-size:16px; font-weight:700; color:var(--navy-900);"><?= e(mask_patient_name((string) $uPt['full_name'])) ?></div>
+                                <small style="color:var(--gray-600);">MRN: <?= e($uPt['mrn'] ?: $uPt['patient_id']) ?></small>
+                            </div>
+                            <label class="field" style="margin-bottom:0;">
+                                <span class="field-label">Confirm Patient Date of Birth <span class="req-star" style="color:#dc2626; font-weight:700;">*</span></span>
+                                <span class="input-wrap">
+                                    <input type="date" name="birthdate" required max="<?= date('Y-m-d') ?>">
+                                </span>
+                                <small class="field-hint">Enter the birthdate registered in the hospital record.</small>
+                            </label>
+                        </div>
+                    <?php endforeach; ?>
+                    <button class="btn btn-primary" type="submit"><span>Confirm Birthdate &amp; Link Profile</span></button>
+                    <div style="margin-top:12px; text-align:center;">
+                        <a class="text-link" href="index.php?auth=login">Already know your password? Sign in →</a>
+                    </div>
+                </form>
+
             <?php else: ?>
+                <!-- CASE 1: No account exists for this phone number -> verify birthdate, create password & account -->
                 <form method="post" action="index.php">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="activate_step3">
-                    <div class="panel" style="padding:12px 14px; background:var(--teal-50); border:1px solid var(--teal-200); margin-bottom:14px; font-size:13px;">
-                        <div>Patient: <strong><?= e($actName) ?></strong></div>
-                        <div>MRN: <code style="font-weight:700; color:var(--teal-800);"><?= e($actMrn) ?></code> · Phone: <strong><?= e($actPhone) ?></strong></div>
-                    </div>
-                    <label class="field">
+                    <p style="font-size:13px; color:var(--gray-600); margin-bottom:12px;">
+                        Registered profile(s) found for <strong><?= e($actPhone) ?></strong>. Enter each patient's birthdate to confirm identity:
+                    </p>
+                    <?php foreach ($actPts as $p): ?>
+                        <div class="panel" style="padding:12px 14px; background:var(--teal-50); border:1px solid var(--teal-200); border-radius:8px; margin-bottom:12px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                                <div>
+                                    <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--teal-800);">Patient Profile</span>
+                                    <div style="font-size:15px; font-weight:700; color:var(--navy-900);"><?= e(mask_patient_name((string) $p['full_name'])) ?></div>
+                                    <small style="color:var(--gray-600);">MRN: <?= e($p['mrn'] ?: $p['patient_id']) ?></small>
+                                </div>
+                                <span class="badge badge-teal">Registered</span>
+                            </div>
+                            <label class="field" style="margin-bottom:0;">
+                                <span class="field-label">Patient Date of Birth <span class="req-star" style="color:#dc2626; font-weight:700;">*</span></span>
+                                <span class="input-wrap">
+                                    <input type="date" name="birthdates[<?= e($p['patient_id']) ?>]" required max="<?= date('Y-m-d') ?>">
+                                </span>
+                            </label>
+                        </div>
+                    <?php endforeach; ?>
+                    <label class="field" style="margin-top:14px;">
                         <span class="field-label">Email Address (Optional)</span>
                         <span class="input-wrap">
                             <input type="email" name="email" placeholder="Optional — can also be added later under Profile">
@@ -133,7 +188,7 @@ unset($_SESSION['register_error']);
                         <?= field('Create Password *', 'password', 'Min. 8 characters', 'password', '', ['required' => true]) ?>
                         <?= field('Confirm Password *', 'confirm_password', 'Re-enter password', 'password', '', ['required' => true]) ?>
                     </div>
-                    <button class="btn btn-primary" type="submit"><span>Activate account &amp; sign in</span></button>
+                    <button class="btn btn-primary" type="submit"><span>Create Account &amp; Activate</span></button>
                 </form>
             <?php endif; ?>
 

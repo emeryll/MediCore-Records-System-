@@ -2,13 +2,42 @@
 declare(strict_types=1);
 
 $orNo      = trim((string) ($_GET['or'] ?? ''));
+$billNo    = trim((string) ($_GET['bill'] ?? ''));
 $autoPrint = isset($_GET['print']);
 
 $payment = null;
 foreach ($state['payments'] ?? [] as $py) {
-    if ($orNo === '' || strcasecmp((string) ($py['receipt_no'] ?? ''), $orNo) === 0) {
+    if ($orNo !== '' && strcasecmp((string) ($py['receipt_no'] ?? ''), $orNo) === 0) {
         $payment = $py;
         break;
+    }
+    if ($billNo !== '' && strcasecmp((string) ($py['bill_no'] ?? ''), $billNo) === 0) {
+        $payment = $py;
+        break;
+    }
+}
+
+// Fallback if looking up by bill_no and no payment record was saved yet
+if ($payment === null && $billNo !== '') {
+    foreach ($state['bills'] ?? [] as $idx => $b) {
+        $norm = normalize_bill_row($b, $idx);
+        if (strcasecmp($norm['bill_no'], $billNo) === 0) {
+            $payment = [
+                'receipt_no'      => 'OR-B' . substr($norm['bill_no'], 5),
+                'bill_no'         => $norm['bill_no'],
+                'patient_name'    => $norm['patient'],
+                'amount_paid'     => $norm['paid'],
+                'amount_received' => $norm['paid'],
+                'change_due'      => 0.0,
+                'payment_method'  => 'Official Statement',
+                'reference_no'    => 'SETTLED',
+                'cashier_name'    => 'Billing Cashier',
+                'paid_date'       => $norm['issued'],
+                'paid_at'         => $norm['issued'],
+                'items'           => $norm['items'],
+            ];
+            break;
+        }
     }
 }
 
@@ -63,7 +92,7 @@ $actions = '<div class="button-pair">'
         </div>
     </div>
 
-    <div class="invoice-parties" style="grid-template-columns: repeat(3, 1fr); gap: 24px;">
+    <div class="invoice-parties receipt-parties">
         <div>
             <span>Received From (Patient)</span>
             <strong><?= e($payment['patient_name'] ?? '—') ?></strong>
@@ -78,6 +107,9 @@ $actions = '<div class="button-pair">'
             <p>
                 Payment Method: <b><?= e($payment['payment_method'] ?? 'Cash') ?></b><br>
                 Reference No.: <?= e(($payment['reference_no'] ?? '—') !== '' ? $payment['reference_no'] : '—') ?>
+                <?php if (!empty($payment['proof_path'])): ?>
+                    <br><span style="color:var(--teal-700); font-weight:600;">📎 Attached Proof: <a href="<?= e($payment['proof_path']) ?>" target="_blank" style="text-decoration:underline; font-weight:700;">View Claim Document</a></span>
+                <?php endif; ?>
             </p>
         </div>
         <div>

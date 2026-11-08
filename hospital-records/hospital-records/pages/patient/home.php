@@ -7,7 +7,7 @@ $firstName = explode(' ', $ptName)[0];
 $mob       = $_GET['mobile'] ?? null;
 $myPtId    = $idInfo['id'];
 $ptRecord  = $idInfo['record'] ?? find_patient_record($state, $ptName);
-$myMrn     = $ptRecord ? patient_mrn_display($ptRecord) : (str_starts_with($myPtId, 'MRN-') ? $myPtId : 'MRN-' . preg_replace('/[^0-9]/', '', $myPtId));
+$myMrn     = $ptRecord ? patient_mrn_display($ptRecord) : (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', (string) $myPtId, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $myPtId);
 $myDob     = format_birthdate($ptRecord[1] ?? '');
 $myAge     = patient_age_label($myDob, false, '—');
 
@@ -33,15 +33,63 @@ foreach ($state['bills'] as $bIdx => $b) {
         $unpaidBills[] = ['idx' => $bIdx, 'row' => $b, 'norm' => normalize_bill_row($b, $bIdx)];
     }
 }
+
+// Find unlinked patients registered with the current user's phone number
+$unlinkedPatients = [];
+if (!empty($_SESSION['user_id'])) {
+    $stmt = db()->prepare('SELECT phone FROM accounts WHERE user_id = :uid LIMIT 1');
+    $stmt->execute([':uid' => $_SESSION['user_id']]);
+    $currAccPhone = (string) $stmt->fetchColumn();
+    if ($currAccPhone !== '') {
+        $unlinkedPatients = db_get_unlinked_patients_by_phone($currAccPhone, (string) $_SESSION['user_id']);
+    }
+}
 ?>
 <div class="pt-greeting-banner">
     <div>
-        <p class="eyebrow">Patient Portal · MRN <?= e($myMrn ?: $myPtId) ?><?= $myDob !== '—' ? ' · Birthday: ' . e($myDob) . ' (' . e($myAge) . ')' : '' ?></p>
+        <p class="eyebrow">Patient Portal · <?= e(str_starts_with($myMrn, 'MRN-') ? $myMrn : 'MRN ' . $myMrn) ?><?= $myDob !== '—' ? ' · Birthday: ' . e($myDob) . ' (' . e($myAge) . ')' : '' ?></p>
         <h1>Good day, <?= e($firstName) ?> 👋</h1>
         <p>Welcome to your West Metro Medical Center patient portal — view your upcoming appointments, prescriptions, and billing statements.</p>
     </div>
     <?= button('Book appointment', ['icon' => 'plus', 'href' => url(['page' => 'book', 'step' => 1, 'mobile' => $mob])]) ?>
 </div>
+
+<?php if (!empty($unlinkedPatients)): ?>
+    <?php foreach ($unlinkedPatients as $unlinked): ?>
+        <?php
+            $attemptKey = 'link_attempts_' . $unlinked['patient_id'];
+            $attempts   = (int) ($_SESSION[$attemptKey] ?? 0);
+            $maskedName = mask_patient_name($unlinked['full_name']);
+            $uDisplayMrn = (string) ($unlinked['mrn'] ?: $unlinked['patient_id']);
+            if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $uDisplayMrn, $m)) {
+                $uDisplayMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            }
+        ?>
+        <div class="pt-link-alert" style="background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; padding:16px 20px; display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:22px; flex-wrap:wrap;" role="alert">
+            <div style="display:flex; align-items:center; gap:14px; flex:1; min-width:280px;">
+                <div style="width:42px; height:42px; border-radius:10px; background:#dbeafe; color:#1d4ed8; display:grid; place-items:center; flex:none;">
+                    <?= icon('patient', 22) ?>
+                </div>
+                <div>
+                    <strong style="color:#1e3a8a; font-size:14px; display:block;">Profile Linking Available</strong>
+                    <p style="color:#1e40af; font-size:13px; margin:2px 0 0;">
+                        We found another patient registered with your number: <strong><?= e($maskedName) ?></strong> (<?= e($uDisplayMrn) ?>).
+                        <?= $attempts >= 3 ? 'Maximum verification attempts reached. Please contact hospital staff.' : 'Enter the birthdate to add this profile.' ?>
+                    </p>
+                </div>
+            </div>
+            <?php if ($attempts < 3): ?>
+                <form method="post" action="index.php" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0;">
+                    <input type="hidden" name="action" value="link_patient_profile">
+                    <input type="hidden" name="patient_id" value="<?= e($unlinked['patient_id']) ?>">
+                    <label for="link_bdate_<?= e($unlinked['patient_id']) ?>" class="sr-only">Birthdate</label>
+                    <input type="date" id="link_bdate_<?= e($unlinked['patient_id']) ?>" name="birthdate" class="form-control" style="padding:7px 12px; font-size:13px; border-radius:8px; border:1px solid #93c5fd; background:#fff;" required>
+                    <button type="submit" class="btn btn-primary" style="padding:7px 14px; font-size:13px;">Add profile</button>
+                </form>
+            <?php endif; ?>
+        </div>
+    <?php endforeach; ?>
+<?php endif; ?>
 
 <?php if ($unpaidBills): ?>
     <?php $firstUnpaid = $unpaidBills[0]['norm']; ?>

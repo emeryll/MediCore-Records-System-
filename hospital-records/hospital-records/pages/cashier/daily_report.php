@@ -81,7 +81,7 @@ $actions = '<div class="button-pair">'
         <div>
             <?= logo() ?>
             <p style="font-size:11px; color:var(--gray-500); margin-top:6px;">
-                <?= e(APP_ADDRESS) ?> · End-of-Day Cashier Collection &amp; Remittance Summary
+                <?= e(defined('HOSPITAL_ADDRESS') ? HOSPITAL_ADDRESS : (defined('APP_ADDRESS') ? APP_ADDRESS : 'Veterans Avenue Extension, Tetuan, Zamboanga City')) ?> · End-of-Day Cashier Collection &amp; Remittance Summary
             </p>
         </div>
         <div style="text-align:right;">
@@ -90,7 +90,7 @@ $actions = '<div class="button-pair">'
                 <?= e(date('M d, Y', strtotime($selDate))) ?>
             </div>
             <div style="font-size:11px; color:var(--gray-500);">
-                Prepared by: <?= e(current_user_name($role)) ?>
+                Prepared by: <?= e(function_exists('current_user_name') ? current_user_name($role) : ($_SESSION['user_name'] ?? 'Hospital Cashier')) ?>
             </div>
         </div>
     </div>

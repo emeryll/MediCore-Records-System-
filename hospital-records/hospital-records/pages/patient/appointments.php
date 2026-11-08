@@ -42,7 +42,7 @@ $activeList = $tab === 'Upcoming' ? $upcoming : $past;
 
 <div class="pt-appt-cards">
     <?php foreach ($activeList as $idx => $a):
-        $canModify = can_patient_modify_appointment((string) ($a[7] ?? ''), (string) ($a[0] ?? ''));
+        $canModify = can_patient_modify_appointment($a);
     ?>
         <article class="panel pt-appt-card">
             <div class="pt-appt-date-box">

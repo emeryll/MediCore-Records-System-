@@ -70,15 +70,21 @@ function booking_window(bool $allowToday = false): array
 }
 
 /** Can a patient cancel or reschedule this appointment (24-hour cutoff rule, Section 4.2)? */
-function can_patient_modify_appointment(array $appt): bool
+function can_patient_modify_appointment(array|string $appt, ?string $timeStr = null): bool
 {
-    $status = (string) ($appt[3] ?? '');
-    if (!in_array($status, BOOKABLE_STATUSES, true)) {
-        return false;
+    if (is_array($appt)) {
+        $status = (string) ($appt[3] ?? '');
+        if ($status !== '' && !in_array($status, BOOKABLE_STATUSES, true)) {
+            return false;
+        }
+        $dateStr = (string) ($appt[7] ?? '');
+        $timeRaw = (string) ($appt[0] ?? '09:00');
+    } else {
+        $dateStr = (string) $appt;
+        $timeRaw = (string) ($timeStr ?? '09:00');
     }
-    $dateStr = (string) ($appt[7] ?? '');
-    $timeStr = normalize_slot((string) ($appt[0] ?? '09:00'));
-    $apptTs  = strtotime($dateStr . ' ' . $timeStr);
+    $timeClean = normalize_slot($timeRaw);
+    $apptTs    = strtotime($dateStr . ' ' . $timeClean);
     if ($apptTs === false) {
         return true;
     }
