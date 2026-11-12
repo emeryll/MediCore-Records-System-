@@ -21,6 +21,7 @@ $isUser        = (str_contains(strtolower($modal), 'user') || str_contains(strto
 $isQuickProv   = ($modal === 'Quick add provisional');
 $isCompleteReg = ($modal === 'Complete registration');
 $isPatient     = in_array($modal, ['Register patient', 'Edit patient'], true);
+$isCorrectPtAddr = in_array($modal, ['Correct patient address', 'Edit patient address'], true);
 $isAppt        = ($modal === 'Book appointment');
 $isApptDetail  = ($modal === 'Appointment details');
 $isAdmit       = ($modal === 'Admit patient');
@@ -42,9 +43,16 @@ if ($modal === 'Edit department') {
 }
 
 $userRow = ['', '', 'Staff', 'Active', ''];
+$userAcc = null;
 if ($modal === 'Edit user' || $isUserDetail) {
     $targetEmail = (string) ($_GET['email'] ?? '');
     $targetUid   = (string) ($_GET['user_id'] ?? '');
+    if ($targetUid !== '' && function_exists('db_find_account_by_id')) {
+        $userAcc = db_find_account_by_id($targetUid);
+    }
+    if (!$userAcc && $targetEmail !== '' && function_exists('db_find_account_by_email')) {
+        $userAcc = db_find_account_by_email($targetEmail);
+    }
     foreach ($state['users'] as $us) {
         if (($targetEmail !== '' && strcasecmp((string) $us[1], $targetEmail) === 0)
             || ($targetUid !== '' && strcasecmp((string) ($us[7] ?? ''), $targetUid) === 0)) {
@@ -65,6 +73,44 @@ if ($modal === 'Edit patient' || $isCompleteReg) {
     }
 }
 
+$targetPtName = (string) ($_GET['patient'] ?? '');
+$targetPtId   = (string) ($_GET['user_id'] ?? ($_GET['patient_id'] ?? ''));
+$targetPtMrn  = $targetPtId;
+$cptRow       = null;
+$isCoiBlocked = false;
+$cptCountry   = 'Philippines';
+$cptProvince  = 'Zamboanga del Sur';
+$cptCity      = 'Zamboanga City';
+$cptBarangay  = '';
+$cptStreet    = '';
+$cptPostal    = '7000';
+
+if ($isCorrectPtAddr) {
+    if ($targetPtName !== '') {
+        $cptRow = find_patient_record($state, $targetPtName);
+    }
+    if (!$cptRow && $targetPtId !== '') {
+        $cptRow = find_patient_record($state, $targetPtId);
+    }
+    if ($cptRow) {
+        $targetPtName = (string) ($cptRow[0] ?? $targetPtName);
+        $targetPtId   = (string) ($cptRow[8] ?? $targetPtId);
+        $targetPtMrn  = (string) patient_mrn_display($cptRow, $targetPtId);
+        $cptCountry   = (string) ($cptRow['country'] ?? 'Philippines');
+        $cptProvince  = (string) ($cptRow['province'] ?? 'Zamboanga del Sur');
+        $cptCity      = (string) ($cptRow['city'] ?? 'Zamboanga City');
+        $cptBarangay  = (string) ($cptRow['barangay'] ?? '');
+        $cptStreet    = (string) ($cptRow['street'] ?? '');
+        $cptPostal    = (string) ($cptRow['postal_code'] ?? '7000');
+    }
+    $currUid = (string) ($_SESSION['user_id'] ?? '');
+    if ($targetPtName !== '' && function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest($currUid, $targetPtName)) {
+        $isCoiBlocked = true;
+    } elseif ($targetPtId !== '' && function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest($currUid, $targetPtId)) {
+        $isCoiBlocked = true;
+    }
+}
+
 $apptIdx = isset($_GET['appt']) ? (int) $_GET['appt'] : -1;
 $apptRow = $state['appointments'][$apptIdx] ?? ($state['appointments'][0] ?? ['09:00', '—', 'Consultation', 'Scheduled', '—', '—', '—', date('M d, Y')]);
 
@@ -81,6 +127,7 @@ $doctorNameOptions = array_column(doctors_data(), 0) ?: ['Dr.enz', 'Dr. Rivera',
 $subtitle = match (true) {
     $isQuickProv   => 'Bare-bones entry for phone-in booking (no MRN issued until check-in).',
     $isCompleteReg => 'Verify patient in person, confirm phone via SMS OTP, and issue permanent MRN.',
+    $isCorrectPtAddr => ($role === 'Admin' ? 'Administrative correction of patient residential address with required reason.' : 'Update verified patient residential address.'),
     $isPatient     => $modal === 'Edit patient' ? 'Update verified patient profile and contact details.' : 'Full walk-in registration — verifies phone via OTP and issues a permanent MRN.',
     $isUserDetail  => 'Complete employee account credentials, contact, and profile details.',
     $isUser        => $modal === 'Edit user' ? 'Update this account\'s details. A reason is required and is recorded in the audit log.' : 'Create or update an employee account. A Set-Password link will be sent to the user.',
@@ -125,6 +172,10 @@ $subtitle = match (true) {
         <?php elseif ($isUser && $modal === 'Edit user'): ?>
             <input type="hidden" name="action" value="edit_user_details">
             <input type="hidden" name="user_id" value="<?= e((string) ($userRow[7] ?? ($_GET['user_id'] ?? ''))) ?>">
+        <?php elseif ($isCorrectPtAddr): ?>
+            <input type="hidden" name="action" value="admin_correct_patient_address">
+            <input type="hidden" name="patient_id" value="<?= e($targetPtId) ?>">
+            <input type="hidden" name="patient_name" value="<?= e($targetPtName) ?>">
         <?php elseif ($isUser): ?>
             <input type="hidden" name="action" value="save_user">
             <input type="hidden" name="orig" value="<?= e($modal === 'Edit user' ? ($userRow[1] ?? '') : '') ?>">
@@ -1360,11 +1411,42 @@ $subtitle = match (true) {
                 </div>
 
                 <strong style="display:block; font-size:12.5px; color:var(--navy-900); text-transform:uppercase; margin-bottom:8px;">Contact &amp; Personal</strong>
+                <?php
+                $uAddress = (string) ($userAcc['address'] ?? ($userRow['address'] ?? ''));
+                if ($uAddress === '') {
+                    $uAddress = implode(', ', array_filter([
+                        (string) ($userAcc['street'] ?? ($userRow['street'] ?? '')),
+                        (string) ($userAcc['barangay'] ?? ($userRow['barangay'] ?? '')),
+                        (string) ($userAcc['city'] ?? ($userRow['city'] ?? '')),
+                        (string) ($userAcc['province'] ?? ($userRow['province'] ?? '')),
+                        (string) ($userAcc['country'] ?? ($userRow['country'] ?? '')),
+                        (string) ($userAcc['postal_code'] ?? ($userRow['postal_code'] ?? '')),
+                    ]));
+                }
+                ?>
                 <div class="form-grid" style="gap:12px; margin-bottom:16px;">
                     <?= $detail('Email Address', $dash($uEmail)) ?>
                     <?= $detail('Mobile Number', $dash($uPhone)) ?>
                     <?= $detail('Birthdate', $uDobFmt) ?>
                     <?= $detail('Sex', $dash($uSex)) ?>
+                    <div style="grid-column: 1 / -1;">
+                        <?= $detail('Residential Address', $dash($uAddress)) ?>
+                        <?php if ($uRole === 'Patient' && in_array($role, ['Admin', 'Staff'], true)): ?>
+                            <div style="margin-top:8px;">
+                                <a href="<?= e(url(['page' => 'users', 'modal' => ($role === 'Admin' ? 'Correct patient address' : 'Edit patient address'), 'patient' => $uName, 'user_id' => $uId])) ?>" class="btn btn-secondary btn-sm" style="display:inline-flex; align-items:center; gap:5px; font-size:12px; height:28px;">
+                                    <?= icon('edit', 14) ?>
+                                    <span><?= $role === 'Admin' ? 'Correct Patient Address' : 'Edit Patient Address' ?></span>
+                                </a>
+                            </div>
+                        <?php elseif ($role === 'Admin' && in_array($uRole, ['Doctor', 'Staff', 'Cashier', 'Admin'], true) && strcasecmp((string) $uId, (string) ($_SESSION['user_id'] ?? '')) !== 0): ?>
+                            <div style="margin-top:8px;">
+                                <a href="<?= e(url(['page' => 'users', 'modal' => 'Edit user', 'user_id' => $uId, 'email' => $uEmail])) ?>" class="btn btn-secondary btn-sm" style="display:inline-flex; align-items:center; gap:5px; font-size:12px; height:28px;">
+                                    <?= icon('edit', 14) ?>
+                                    <span>Edit Residential Address & Details</span>
+                                </a>
+                            </div>
+                        <?php endif; ?>
+                    </div>
                 </div>
 
                 <?php if ($uRole === 'Doctor'): ?>
@@ -1385,6 +1467,13 @@ $subtitle = match (true) {
                 $uPhone      = (string) ($userRow[11] ?? ($userRow['phone'] ?? ''));
                 $uDob        = (string) ($userRow[10] ?? '');
                 $uSex        = (string) ($userRow['sex'] ?? ($userRow[12] ?? ''));
+                $uCountry    = (string) ($userAcc['country'] ?? ($userRow['country'] ?? 'Philippines'));
+                $uProvince   = (string) ($userAcc['province'] ?? ($userRow['province'] ?? 'Zamboanga del Sur'));
+                $uCity       = (string) ($userAcc['city'] ?? ($userRow['city'] ?? 'Zamboanga City'));
+                $uBarangay   = (string) ($userAcc['barangay'] ?? ($userRow['barangay'] ?? ''));
+                $uStreet     = (string) ($userAcc['street'] ?? ($userRow['street'] ?? ''));
+                $uPostal     = (string) ($userAcc['postal_code'] ?? ($userRow['postal_code'] ?? '7000'));
+                $uAddress    = (string) ($userAcc['address'] ?? ($userRow['address'] ?? ''));
                 ?>
                 <?php $isEditUser = ($modal === 'Edit user'); ?>
                 <div class="form-grid">
@@ -1424,7 +1513,41 @@ $subtitle = match (true) {
                         </span>
                     </label>
                 </div>
-                <div id="doctor_fields_row" class="form-grid three-col" style="<?= $currentRole === 'Doctor' ? '' : 'display:none;' ?>">
+
+                <div style="margin-top:14px; margin-bottom:6px; font-weight:700; font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--navy-900);">Residential Address</div>
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">Country <span style="color:#dc2626;">*</span></span>
+                        <span class="input-wrap"><select name="country" id="usr-country-select" required></select><?= icon('down', 16) ?></span>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">Province / Region <span style="color:#dc2626;">*</span></span>
+                        <span class="input-wrap"><select name="province" id="usr-province-select" required></select><?= icon('down', 16) ?></span>
+                    </label>
+                </div>
+                <div class="form-grid">
+                    <label class="field">
+                        <span class="field-label">City / Municipality <span style="color:#dc2626;">*</span></span>
+                        <span class="input-wrap"><select name="city" id="usr-city-select" required></select><?= icon('down', 16) ?></span>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">Barangay / District <span style="color:#dc2626;">*</span></span>
+                        <span class="input-wrap"><select name="barangay" id="usr-barangay-select" required></select><?= icon('down', 16) ?></span>
+                    </label>
+                </div>
+                <div class="form-grid" style="grid-template-columns: 2fr 1fr;">
+                    <label class="field">
+                        <span class="field-label">House No., Street, Building <span style="color:#dc2626;">*</span></span>
+                        <span class="input-wrap"><input type="text" name="street" id="usr-street-input" placeholder="e.g. 123 Camins Road" value="<?= e($uStreet) ?>" required></span>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">Postal / ZIP Code</span>
+                        <span class="input-wrap"><input type="text" name="postal_code" id="usr-postal-input" placeholder="e.g. 7000" value="<?= e($uPostal) ?>"></span>
+                    </label>
+                </div>
+                <input type="hidden" name="address" id="usr-address-full" value="<?= e($uAddress) ?>">
+
+                <div id="doctor_fields_row" class="form-grid three-col" style="<?= $currentRole === 'Doctor' ? 'margin-top:14px;' : 'display:none; margin-top:14px;' ?>">
                     <label class="field">
                         <span class="field-label">Department *</span>
                         <span class="input-wrap">
@@ -1463,9 +1586,9 @@ $subtitle = match (true) {
                     var deptIn  = document.getElementById('doc_dept_field');
                     var specIn  = document.getElementById('doc_spec_field');
                     var licIn   = document.getElementById('doc_license_field');
-                    if (!roleSel || !docRow) return;
 
                     function toggleDoctorFields() {
+                        if (!roleSel || !docRow) return;
                         var isDoc = roleSel.value === 'Doctor';
                         if (isDoc) {
                             docRow.style.display = 'grid';
@@ -1479,8 +1602,26 @@ $subtitle = match (true) {
                             if (licIn)  { licIn.required  = false; licIn.value = ''; }
                         }
                     }
-                    roleSel.addEventListener('change', toggleDoctorFields);
-                    toggleDoctorFields();
+                    if (roleSel) {
+                        roleSel.addEventListener('change', toggleDoctorFields);
+                        toggleDoctorFields();
+                    }
+
+                    if (window.PHAddressSelector) {
+                        window.PHAddressSelector.init({
+                            country: document.getElementById('usr-country-select'),
+                            province: document.getElementById('usr-province-select'),
+                            city: document.getElementById('usr-city-select'),
+                            barangay: document.getElementById('usr-barangay-select'),
+                            street: document.getElementById('usr-street-input'),
+                            postal: document.getElementById('usr-postal-input'),
+                            initialCountry: <?= json_encode($uCountry ?: 'Philippines') ?>,
+                            initialProvince: <?= json_encode($uProvince ?: 'Zamboanga del Sur') ?>,
+                            initialCity: <?= json_encode($uCity ?: 'Zamboanga City') ?>,
+                            initialBarangay: <?= json_encode($uBarangay) ?>,
+                            initialPostal: <?= json_encode($uPostal ?: '7000') ?>
+                        });
+                    }
                 })();
                 </script>
                 <input type="hidden" name="phone_verified" value="1">
@@ -1503,14 +1644,89 @@ $subtitle = match (true) {
                     <?= select_field('Department head', 'dept_head', $doctorNameOptions, $deptRow[1] ?: ($doctorNameOptions[0] ?? '')) ?>
                 </div>
                 <?= field('Location *', 'dept_location', 'e.g. 3rd Floor, Main Wing', 'text', $deptRow[3] ?? ($deptRow[2] ?? ''), ['required' => true]) ?>
+            <?php elseif ($isCorrectPtAddr): ?>
+                <?php if ($isCoiBlocked): ?>
+                    <div style="background:#fee2e2; border:1px solid #f87171; border-radius:10px; padding:16px 20px; color:#991b1b; margin-bottom:14px;">
+                        <strong style="font-size:15px; display:block; margin-bottom:6px;">⚠️ Conflict of Interest Blocked</strong>
+                        <p style="margin:0; font-size:14px; font-weight:700;"><?= $role === 'Admin' ? 'Another admin must do this.' : 'Conflict of Interest' ?></p>
+                        <p style="margin:4px 0 0; font-size:12.5px; color:#b91c1c;">
+                            <?= $role === 'Admin'
+                                ? 'Under conflict-of-interest rules, an administrator cannot correct or modify patient records linked to their own login (their own record or dependents).'
+                                : 'You cannot edit your own patient record (or records linked to your login). Please update your residential address via your Patient Portal profile.' ?>
+                        </p>
+                    </div>
+                <?php else: ?>
+                    <div style="background:var(--teal-50); border:1px solid var(--teal-200); border-radius:10px; padding:12px 16px; margin-bottom:16px;">
+                        <strong style="color:var(--teal-900); font-size:14px; display:block;">Patient Record: <?= e($targetPtName) ?> (<?= e($targetPtMrn) ?>)</strong>
+                        <p style="margin:3px 0 0; font-size:12px; color:var(--teal-800);"><?= $role === 'Admin' ? 'Administrative oversight correction will be logged in the audit log and address history.' : 'Residential address update will be saved and recorded in the patient address history.' ?></p>
+                    </div>
+
+                    <div class="form-grid">
+                        <label class="field">
+                            <span class="field-label">Country <span style="color:#dc2626;">*</span></span>
+                            <span class="input-wrap"><select name="country" id="cpt-country-select" required></select><?= icon('down', 16) ?></span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">Province / Region <span style="color:#dc2626;">*</span></span>
+                            <span class="input-wrap"><select name="province" id="cpt-province-select" required></select><?= icon('down', 16) ?></span>
+                        </label>
+                    </div>
+
+                    <div class="form-grid">
+                        <label class="field">
+                            <span class="field-label">City / Municipality <span style="color:#dc2626;">*</span></span>
+                            <span class="input-wrap"><select name="city" id="cpt-city-select" required></select><?= icon('down', 16) ?></span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">Barangay / District <span style="color:#dc2626;">*</span></span>
+                            <span class="input-wrap"><select name="barangay" id="cpt-barangay-select" required></select><?= icon('down', 16) ?></span>
+                        </label>
+                    </div>
+
+                    <div class="form-grid">
+                        <label class="field">
+                            <span class="field-label">Street / Building / Unit (Put N/A if not applicable) <span style="color:#dc2626;">*</span></span>
+                            <span class="input-wrap"><input type="text" name="street" id="cpt-street-input" placeholder="Put N/A if not applicable" value="<?= e($cptStreet ?: 'N/A') ?>" required></span>
+                        </label>
+                        <label class="field">
+                            <span class="field-label">Postal / ZIP Code</span>
+                            <span class="input-wrap"><input type="text" name="postal_code" id="cpt-postal-input" value="<?= e($cptPostal ?: '7000') ?>" readonly style="background:var(--gray-50); font-family:monospace; font-weight:600;"></span>
+                        </label>
+                    </div>
+
+                    <label class="field" style="margin-top:14px; display:block;">
+                        <span class="field-label">Reason for <?= $role === 'Admin' ? 'correction' : 'update' ?> <?= $role === 'Admin' ? '<span style="color:#dc2626;">*</span>' : '(Optional)' ?></span>
+                        <span class="input-wrap"><textarea name="reason" rows="3" <?= $role === 'Admin' ? 'minlength="5" required' : '' ?> placeholder="<?= $role === 'Admin' ? 'State the required reason for this address correction (recorded in audit log & address history)' : 'Optional reason or note for address update' ?>" style="width:100%;"></textarea></span>
+                    </label>
+
+                    <script>
+                    (function() {
+                        if (window.PHAddressSelector) {
+                            window.PHAddressSelector.init({
+                                country: document.getElementById('cpt-country-select'),
+                                province: document.getElementById('cpt-province-select'),
+                                city: document.getElementById('cpt-city-select'),
+                                barangay: document.getElementById('cpt-barangay-select'),
+                                street: document.getElementById('cpt-street-input'),
+                                postal: document.getElementById('cpt-postal-input'),
+                                initialCountry: <?= json_encode($cptCountry ?: 'Philippines') ?>,
+                                initialProvince: <?= json_encode($cptProvince ?: 'Zamboanga del Sur') ?>,
+                                initialCity: <?= json_encode($cptCity ?: 'Zamboanga City') ?>,
+                                initialBarangay: <?= json_encode($cptBarangay) ?>,
+                                initialPostal: <?= json_encode($cptPostal ?: '7000') ?>
+                            });
+                        }
+                    })();
+                    </script>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
 
         <div class="modal-actions" <?= ($isCompleteReg || $isPatient) ? 'style="display:none;"' : '' ?>>
             <?= button('Close', ['variant' => 'secondary', 'href' => $closeUrl]) ?>
-            <?php if (!$isUserDetail): ?>
+            <?php if (!$isUserDetail && !($isCorrectPtAddr && $isCoiBlocked)): ?>
                 <button type="submit" class="btn btn-primary">
-                    <span><?= e($isCompleteReg ? 'Complete Registration & Issue MRN' : ($isQuickProv ? 'Save Record' : 'Save & Confirm')) ?></span>
+                    <span><?= e($isCompleteReg ? 'Complete Registration & Issue MRN' : ($isQuickProv ? 'Save Record' : ($isCorrectPtAddr ? 'Save Address Correction' : 'Save & Confirm'))) ?></span>
                 </button>
             <?php endif; ?>
         </div>

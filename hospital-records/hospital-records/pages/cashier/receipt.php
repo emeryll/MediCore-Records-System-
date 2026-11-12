@@ -56,6 +56,15 @@ if ($payment === null): ?>
 $ptRec   = find_patient_record($state, (string) ($payment['patient_name'] ?? ''));
 $mrnStr  = $ptRec ? patient_mrn_display($ptRec) : ($ptRec[8] ?? 'MRN-1001');
 $ptHin   = $ptRec[3] ?? '—';
+$matchedBill = null;
+foreach ($state['bills'] ?? [] as $bIdx => $b) {
+    $nb = normalize_bill_row($b, $bIdx);
+    if (strcasecmp($nb['bill_no'], (string) ($payment['bill_no'] ?? '')) === 0) {
+        $matchedBill = $nb;
+        break;
+    }
+}
+$receiptPtAddr = !empty($matchedBill['patient_address']) ? $matchedBill['patient_address'] : ($ptRec[7] ?? ($ptRec['address'] ?? '—'));
 $items   = (!empty($payment['items']) && is_array($payment['items']))
     ? $payment['items']
     : default_bill_items(parse_money($payment['amount_paid'] ?? 0));
@@ -98,7 +107,8 @@ $actions = '<div class="button-pair">'
             <strong><?= e($payment['patient_name'] ?? '—') ?></strong>
             <p>
                 MRN: <code><?= e($mrnStr ?: '—') ?></code><br>
-                PhilHealth / HMO: <?= e($ptHin) ?>
+                PhilHealth / HMO: <?= e($ptHin) ?><br>
+                Address: <?= e($receiptPtAddr) ?>
             </p>
         </div>
         <div>

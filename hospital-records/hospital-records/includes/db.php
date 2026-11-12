@@ -40,6 +40,9 @@ function db(): PDO
             ]);
             $tmp->exec("CREATE DATABASE IF NOT EXISTS `{$name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
             $tmp->exec("USE `{$name}`");
+            try {
+                $tmp->exec("SET SESSION sql_mode = (SELECT CONCAT(IFNULL(@@sql_mode, ''), ',PIPES_AS_CONCAT'))");
+            } catch (Throwable) {}
             $pdo    = $tmp;
             $driver = 'mysql';
         } catch (Throwable) {
@@ -266,7 +269,33 @@ function db_init_schema(PDO $pdo, string $driver): void
         receipt_path VARCHAR(255) DEFAULT NULL,
         items_json LONGTEXT DEFAULT NULL
     )");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS address_history (
+        id {$autoInc},
+        owner_type VARCHAR(20) NOT NULL,
+        owner_id VARCHAR(40) NOT NULL,
+        old_country VARCHAR(100) DEFAULT '',
+        old_province VARCHAR(100) DEFAULT '',
+        old_city VARCHAR(100) DEFAULT '',
+        old_barangay VARCHAR(100) DEFAULT '',
+        old_street VARCHAR(255) DEFAULT '',
+        old_postal_code VARCHAR(30) DEFAULT '',
+        old_address VARCHAR(255) DEFAULT '',
+        new_country VARCHAR(100) DEFAULT '',
+        new_province VARCHAR(100) DEFAULT '',
+        new_city VARCHAR(100) DEFAULT '',
+        new_barangay VARCHAR(100) DEFAULT '',
+        new_street VARCHAR(255) DEFAULT '',
+        new_postal_code VARCHAR(30) DEFAULT '',
+        new_address VARCHAR(255) DEFAULT '',
+        changed_by_user_id VARCHAR(40) NOT NULL,
+        active_role VARCHAR(30) NOT NULL,
+        reason TEXT DEFAULT NULL,
+        changed_at VARCHAR(40) NOT NULL
+    )");
+
     foreach ([
+        "ALTER TABLE bills ADD COLUMN patient_address VARCHAR(255) DEFAULT NULL",
         "ALTER TABLE bills ADD COLUMN bill_no VARCHAR(40) NOT NULL DEFAULT ''",
         "ALTER TABLE bills ADD COLUMN paid_amount VARCHAR(40) NOT NULL DEFAULT '0'",
         "ALTER TABLE bills ADD COLUMN items_json LONGTEXT DEFAULT NULL",
@@ -395,14 +424,12 @@ function db_init_schema(PDO $pdo, string $driver): void
     } catch (Throwable) {}
 
     try {
-        $lList = $pdo->query("SELECT id, mrn, patient_id FROM patient_account_links WHERE mrn LIKE 'P-%' OR patient_id LIKE 'P-%'")->fetchAll(PDO::FETCH_ASSOC);
-        $updLink = $pdo->prepare("UPDATE patient_account_links SET mrn = :mrn, patient_id = :pid WHERE id = :id");
+        $lList = $pdo->query("SELECT id, patient_id FROM patient_account_links WHERE patient_id LIKE 'P-%'")->fetchAll(PDO::FETCH_ASSOC);
+        $updLink = $pdo->prepare("UPDATE patient_account_links SET patient_id = :pid WHERE id = :id");
         foreach ($lList as $lRow) {
-            $rawMrn = (string) $lRow['mrn'];
             $rawPid = (string) $lRow['patient_id'];
-            $cleanMrn = preg_match('/^P-0*(\d+)$/i', $rawMrn, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $rawMrn;
             $cleanPid = preg_match('/^P-0*(\d+)$/i', $rawPid, $m) ? 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT) : $rawPid;
-            $updLink->execute([':mrn' => $cleanMrn, ':pid' => $cleanPid, ':id' => $lRow['id']]);
+            $updLink->execute([':pid' => $cleanPid, ':id' => $lRow['id']]);
         }
     } catch (Throwable) {}
 
@@ -547,13 +574,15 @@ function db_init_schema(PDO $pdo, string $driver): void
         id {$autoInc},
         account_uid VARCHAR(30) NOT NULL,
         patient_id VARCHAR(30) NOT NULL,
-        mrn VARCHAR(30) NOT NULL,
-        patient_name VARCHAR(150) NOT NULL,
         relationship_label VARCHAR(60) NOT NULL DEFAULT 'Self',
         is_primary TINYINT(1) NOT NULL DEFAULT 0,
         linked_at VARCHAR(40) NOT NULL,
-        linked_by VARCHAR(60) NOT NULL DEFAULT 'Self-Service'
+        linked_by VARCHAR(60) NOT NULL DEFAULT 'Self-Service',
+        unlinked_at VARCHAR(40) DEFAULT NULL
     )");
+    try {
+        $pdo->exec("ALTER TABLE patient_account_links ADD COLUMN unlinked_at VARCHAR(40) DEFAULT NULL");
+    } catch (Throwable) {}
     try {
         $pdo->exec("CREATE UNIQUE INDEX uniq_acc_patient ON patient_account_links (account_uid, patient_id)");
     } catch (Throwable) {}
@@ -561,21 +590,40 @@ function db_init_schema(PDO $pdo, string $driver): void
     // Auto-link existing patient accounts to their corresponding patient record if not already linked
     try {
         $pAccs = $pdo->query("SELECT user_id, full_name FROM accounts WHERE role = 'Patient'")->fetchAll(PDO::FETCH_ASSOC);
-        $insLink = $pdo->prepare("INSERT IGNORE INTO patient_account_links (account_uid, patient_id, mrn, patient_name, relationship_label, is_primary, linked_at, linked_by)
-            VALUES (:auid, :pid, :mrn, :pname, 'Me', 1, :lat, 'System Initial Migration')");
+        $insLink = $pdo->prepare("INSERT OR IGNORE INTO patient_account_links (account_uid, patient_id, relationship_label, is_primary, linked_at, linked_by)
+            VALUES (:auid, :pid, 'Self', 1, :lat, 'System Initial Migration')");
         foreach ($pAccs as $pa) {
             $uId = (string) $pa['user_id'];
-            $pQuery = $pdo->prepare("SELECT patient_id, mrn, full_name FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1");
-            $pQuery->execute([':pid' => strtoupper($uId)]);
+            $mrnEquiv = str_replace('P-', 'MRN-', $uId);
+            $pQuery = $pdo->prepare("SELECT patient_id, mrn FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me OR UPPER(first_name || ' ' || last_name) = :fn) AND (registration_status = 'Registered' OR registration_status IS NULL) LIMIT 1");
+            $pQuery->execute([':pid' => strtoupper($uId), ':me' => strtoupper($mrnEquiv), ':fn' => strtoupper((string) $pa['full_name'])]);
             if ($pRow = $pQuery->fetch(PDO::FETCH_ASSOC)) {
                 $insLink->execute([
                     ':auid'  => $uId,
                     ':pid'   => $pRow['patient_id'],
-                    ':mrn'   => $pRow['mrn'] ?: $pRow['patient_id'],
-                    ':pname' => $pRow['full_name'],
                     ':lat'   => date('Y-m-d H:i:s'),
                 ]);
             }
+        }
+    } catch (Throwable) {}
+
+    // Multi-role table: user_roles (id, user_id, role, created_at)
+    $pdo->exec("CREATE TABLE IF NOT EXISTS user_roles (
+        id {$autoInc},
+        user_id VARCHAR(30) NOT NULL,
+        role VARCHAR(30) NOT NULL,
+        created_at VARCHAR(40) NOT NULL,
+        CONSTRAINT uk_user_role UNIQUE (user_id, role)
+    )");
+
+    // Auto-migrate accounts to user_roles
+    try {
+        if ($driver === 'mysql') {
+            $pdo->exec("INSERT IGNORE INTO user_roles (user_id, role, created_at)
+                SELECT user_id, role, COALESCE(created_at, NOW()) FROM accounts WHERE role IS NOT NULL AND TRIM(role) != ''");
+        } else {
+            $pdo->exec("INSERT OR IGNORE INTO user_roles (user_id, role, created_at)
+                SELECT user_id, role, COALESCE(created_at, datetime('now')) FROM accounts WHERE role IS NOT NULL AND TRIM(role) != ''");
         }
     } catch (Throwable) {}
 }
@@ -790,10 +838,24 @@ function db_find_patient_by_id(string $patientId): ?array
         return null;
     }
     $pdo  = db();
-    $stmt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid LIMIT 1');
+    $stmt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
     $stmt->execute([':pid' => $pid]);
     $p = $stmt->fetch(PDO::FETCH_ASSOC);
-    return $p ?: null;
+    if (!$p) {
+        return null;
+    }
+    if (!isset($p['full_name'])) {
+        $p['full_name'] = trim(($p['first_name'] ?? '') . ' ' . (!empty($p['middle_name']) ? $p['middle_name'] . ' ' : '') . ($p['last_name'] ?? ''));
+    }
+    if (!isset($p['address'])) {
+        $addrParts = array_filter([$p['street'] ?? '', $p['barangay'] ?? '', $p['city'] ?? '', $p['province'] ?? '', $p['country'] ?? ''], fn($x) => trim((string)$x) !== '');
+        $p['address'] = !empty($addrParts) ? implode(', ', $addrParts) : '—';
+    }
+    if (!isset($p['contact_name'])) {
+        $cName = trim(($p['contact_first_name'] ?? '') . ' ' . (!empty($p['contact_middle_name']) ? $p['contact_middle_name'] . ' ' : '') . ($p['contact_last_name'] ?? ''));
+        $p['contact_name'] = $cName !== '' ? $cName : null;
+    }
+    return $p;
 }
 
 /** Generate next available auto-incremented prefix ID (D-1001, S-1001, C-1001, P-1001) ensuring no duplicate ID ever exists. */
@@ -1081,7 +1143,7 @@ function db_next_mrn(): string
                 $num += 1000;
             }
             $maxNum = max($maxNum, $num);
-            $used['MRN-' . str_pad((string) $num, 4, '0', STR_PAD_LEFT)] = true;
+            $used['MRN-' . str_pad((string) $num, 6, '0', STR_PAD_LEFT)] = true;
         }
     };
 
@@ -1099,7 +1161,7 @@ function db_next_mrn(): string
 
     $next = $maxNum + 1;
     do {
-        $cand = 'MRN-' . str_pad((string) $next, 4, '0', STR_PAD_LEFT);
+        $cand = 'MRN-' . str_pad((string) $next, 6, '0', STR_PAD_LEFT);
         $next++;
     } while (isset($used[$cand]));
 
@@ -1359,14 +1421,13 @@ function db_update_user_account(
     $addrParts = array_filter([$street, $barangay, $city, $province, $country, $postalCode]);
     $formattedAddr = implode(', ', $addrParts) ?: (string) ($acc['address'] ?? '');
 
-    $sql = 'UPDATE accounts SET user_id = :uid, full_name = :fn, username = :un, email = :em, role = :r, user_role_label = :rl, status = :st, department = :dp, specialty = :sp, license_number = :lc, birthdate = :bd, phone = :ph, country = :co, province = :pr, city = :ci, barangay = :bg, street = :stt, postal_code = :pc, sex = :sx, address = :addr';
+    $sql = 'UPDATE accounts SET user_id = :uid, full_name = :fn, username = :un, email = :em, role = :r, status = :st, department = :dp, specialty = :sp, license_number = :lc, birthdate = :bd, phone = :ph, country = :co, province = :pr, city = :ci, barangay = :bg, street = :stt, postal_code = :pc, sex = :sx';
     $params = [
         ':uid'  => $currentUserId,
         ':fn'   => $fullName,
         ':un'   => $username,
         ':em'   => $email,
         ':r'    => $role,
-        ':rl'   => $normRoleLabel,
         ':st'   => $status,
         ':dp'   => $dept,
         ':sp'   => $spec,
@@ -1380,7 +1441,6 @@ function db_update_user_account(
         ':stt'  => $street,
         ':pc'   => $postalCode,
         ':sx'   => $sex ?: 'Not specified',
-        ':addr' => $formattedAddr,
         ':id'   => $acc['id'],
     ];
 
@@ -1675,32 +1735,42 @@ function db_load_state(): array
     $stmt    = $pdo->query("SELECT * FROM accounts ORDER BY id ASC");
     $rawUsers = $stmt->fetchAll();
     foreach ($rawUsers as &$u) {
-        $rl = (string) ($u['user_role_label'] ?? '');
-        if ($u['role'] === 'Admin' || $rl === 'Admin' || $rl === 'Administrator') {
+        $rl = (string) ($u['role'] ?? 'Staff');
+        if ($rl === 'Administrator') {
             $rl = 'Admin';
-        } elseif ($rl === '' || strcasecmp($rl, 'Front desk') === 0 || strcasecmp($rl, 'Staff') === 0) {
-            $rl = $u['role'] === 'Doctor' ? 'Doctor' : ($u['role'] === 'Cashier' ? 'Cashier' : ($u['role'] === 'Patient' ? 'Patient' : 'Staff'));
         }
         $expPrefix = db_prefix_for_role($rl);
         $uid       = strtoupper(trim((string) ($u['user_id'] ?? '')));
         if ($uid === '' || strtoupper(substr($uid, 0, 1)) !== $expPrefix || isset($seenIds[$uid])) {
             $uid = db_next_user_id($expPrefix);
-            $pdo->prepare('UPDATE accounts SET user_id = :uid, user_role_label = :rl WHERE id = :id')
-                ->execute([':uid' => $uid, ':rl' => $rl, ':id' => $u['id']]);
-        } elseif ($u['user_role_label'] !== $rl) {
-            $pdo->prepare('UPDATE accounts SET user_role_label = :rl WHERE id = :id')
-                ->execute([':rl' => $rl, ':id' => $u['id']]);
+            $pdo->prepare('UPDATE accounts SET user_id = :uid WHERE id = :id')
+                ->execute([':uid' => $uid, ':id' => $u['id']]);
         }
-        $seenIds[$uid]        = true;
-        $u['user_id']         = $uid;
-        $u['user_role_label'] = $rl;
+        $seenIds[$uid] = true;
+        $u['user_id']  = $uid;
     }
     unset($u);
     foreach (array_reverse($rawUsers) as $u) {
+        $roleLabel = match($u['role'] ?? '') {
+            'Admin' => 'Admin',
+            'Doctor' => 'Doctor',
+            'Cashier' => 'Cashier',
+            'Patient' => 'Patient',
+            default => 'Staff',
+        };
+        $uAddrParts = array_filter([
+            $u['street'] ?? '',
+            $u['barangay'] ?? '',
+            $u['city'] ?? '',
+            $u['province'] ?? '',
+            $u['country'] ?? '',
+            $u['postal_code'] ?? '',
+        ], fn($v) => trim((string)$v) !== '' && trim((string)$v) !== '—');
+        $uAddr = !empty($uAddrParts) ? implode(', ', $uAddrParts) : '—';
         $users[] = [
             $u['full_name'],
             $u['email'],
-            $u['user_role_label'],
+            $roleLabel,
             $u['status'],
             $u['last_login'],
             $u['department'],
@@ -1711,7 +1781,7 @@ function db_load_state(): array
             $u['birthdate'] ?? '',
             'phone'                  => $u['phone'] ?? '',
             'phone_verified'         => (int) ($u['phone_verified'] ?? 0),
-            'address'                => $u['address'] ?? '',
+            'address'                => $uAddr,
             'country'                => $u['country'] ?? 'Philippines',
             'province'               => $u['province'] ?? '',
             'city'                   => $u['city'] ?? '',
@@ -1731,8 +1801,26 @@ function db_load_state(): array
     foreach ($stmt->fetchAll() as $p) {
         $pid       = (string) ($p['patient_id'] ?? '');
         $regStatus = (string) ($p['registration_status'] ?? '');
-        if ($regStatus === '' || str_starts_with(strtoupper($pid), 'PROV-') || stripos((string) ($p['address'] ?? ''), 'provisional') !== false) {
-            $regStatus = (str_starts_with(strtoupper($pid), 'PROV-') || stripos((string) ($p['address'] ?? ''), 'provisional') !== false) ? 'Provisional' : ($regStatus ?: 'Registered');
+        $fName     = (string) ($p['first_name'] ?? '');
+        $mName     = (string) ($p['middle_name'] ?? '');
+        $lName     = (string) ($p['last_name'] ?? '');
+        $fullName  = trim($fName . ($mName !== '' ? ' ' . $mName : '') . ($lName !== '' ? ' ' . $lName : ''));
+        if ($fullName === '') {
+            $fullName = 'Patient ' . $pid;
+        }
+
+        $ptAddrParts = array_filter([
+            $p['street'] ?? '',
+            $p['barangay'] ?? '',
+            $p['city'] ?? '',
+            $p['province'] ?? '',
+            $p['country'] ?? '',
+            $p['postal_code'] ?? '',
+        ], fn($v) => trim((string)$v) !== '' && trim((string)$v) !== '—');
+        $ptAddress = !empty($ptAddrParts) ? implode(', ', $ptAddrParts) : '—';
+
+        if ($regStatus === '' || str_starts_with(strtoupper($pid), 'PROV-') || stripos($ptAddress, 'provisional') !== false) {
+            $regStatus = (str_starts_with(strtoupper($pid), 'PROV-') || stripos($ptAddress, 'provisional') !== false) ? 'Provisional' : ($regStatus ?: 'Registered');
         }
 
         // Rule: Provisional accounts are only allowed until 30 days. After 30 days, auto-archive.
@@ -1747,7 +1835,7 @@ function db_load_state(): array
             $chk->execute([':ac' => $arcCode]);
             if (!$chk->fetchColumn()) {
                 db_archive_record(
-                    $p['full_name'] . ' (' . $pid . ')',
+                    $fullName . ' (' . $pid . ')',
                     'Provisional Patient',
                     'System (30-Day Auto Archive)',
                     $p
@@ -1778,26 +1866,11 @@ function db_load_state(): array
             }
         }
 
-        $nameParts = explode(' ', trim((string) ($p['full_name'] ?? '')), 3);
-        $fName     = (string) ($p['first_name'] ?? '');
-        $mName     = (string) ($p['middle_name'] ?? '');
-        $lName     = (string) ($p['last_name'] ?? '');
-        if ($fName === '' && $lName === '') {
-            $fName = $nameParts[0] ?? '';
-            $lName = count($nameParts) === 3 ? $nameParts[2] : ($nameParts[1] ?? '');
-            $mName = count($nameParts) === 3 ? $nameParts[1] : '';
-        }
-
-        $cNameFull = (string) ($p['contact_name'] ?? '');
-        $cParts    = explode(' ', trim($cNameFull), 3);
         $cfName    = (string) ($p['contact_first_name'] ?? '');
         $cmName    = (string) ($p['contact_middle_name'] ?? '');
         $clName    = (string) ($p['contact_last_name'] ?? '');
-        if ($cfName === '' && $clName === '' && $cNameFull !== '') {
-            $cfName = $cParts[0] ?? '';
-            $clName = count($cParts) === 3 ? $cParts[2] : ($cParts[1] ?? '');
-            $cmName = count($cParts) === 3 ? $cParts[1] : '';
-        }
+        $cNameFull = trim($cfName . ($cmName !== '' ? ' ' . $cmName : '') . ($clName !== '' ? ' ' . $clName : ''));
+
         $cRelRaw   = (string) ($p['contact_relationship'] ?? '');
         $cRelOther = (string) ($p['contact_relationship_other'] ?? '');
         $cRelBase  = $cRelRaw;
@@ -1807,14 +1880,14 @@ function db_load_state(): array
         }
 
         $patients[] = [
-            $p['full_name'],
+            $fullName,
             $p['birthdate'],
             $p['phone'],
             $p['insurance_no'],
             $p['avatar'],
             $p['sex'],
             $p['blood_type'],
-            $p['address'],
+            $ptAddress,
             $pid,
             9                     => $mrn,
             10                    => $regStatus,
@@ -1985,8 +2058,17 @@ function db_load_state(): array
 
     // 3. CRUD: departments, rooms, beds, price_list, doctor_schedules
     $departments = [];
-    foreach ($pdo->query('SELECT * FROM departments ORDER BY id ASC')->fetchAll() as $d) {
-        $departments[] = [$d['name'], $d['head_doctor'], $d['staff_count'], $d['location']];
+    $deptStmt = $pdo->query('SELECT d.*, u.full_name as head_doc_fn,
+        (SELECT COUNT(*) FROM accounts a WHERE LOWER(a.department) = LOWER(d.name) AND a.status = "Active") as active_staff_count
+        FROM departments d
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(d.head_doctor_id)
+        ORDER BY d.id ASC');
+    foreach ($deptStmt->fetchAll() as $d) {
+        $headDoc = (string)($d['head_doc_fn'] ?? 'Unassigned');
+        if ($headDoc !== '' && $headDoc !== 'Unassigned' && !str_starts_with($headDoc, 'Dr.')) {
+            $headDoc = 'Dr. ' . $headDoc;
+        }
+        $departments[] = [$d['name'], $headDoc, (string)($d['active_staff_count'] ?? 0), $d['location']];
     }
     if (!$departments) {
         $departments = seed_departments_list();
@@ -2053,8 +2135,8 @@ function db_load_state(): array
     }
 
     $rooms = [];
-    foreach ($pdo->query('SELECT * FROM rooms ORDER BY room_number ASC')->fetchAll() as $r) {
-        $rooms[] = [$r['room_number'], $r['ward'], $r['status'], $r['patient_name']];
+    foreach ($pdo->query('SELECT room_number, ward, status FROM rooms ORDER BY room_number ASC')->fetchAll() as $r) {
+        $rooms[] = [$r['room_number'], $r['ward'], $r['status'], '—'];
     }
     if (!$rooms) {
         foreach ($beds as $bRoom) {
@@ -2062,34 +2144,67 @@ function db_load_state(): array
         }
     }
 
-    // 4. Appointments
+    // 4. Appointments (3NF joins)
     $appointments = [];
-    foreach ($pdo->query('SELECT * FROM appointments ORDER BY id ASC')->fetchAll() as $a) {
+    $apptStmt = $pdo->query('SELECT a.*,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+        u.full_name as d_fn
+        FROM appointments a
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(a.patient_id) OR UPPER(p.mrn) = UPPER(a.patient_id))
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(a.doctor_id)
+        ORDER BY a.id ASC');
+    foreach ($apptStmt->fetchAll() as $a) {
+        $ptName = trim(($a['p_fn'] ?? '') . ' ' . (!empty($a['p_mn']) ? $a['p_mn'] . ' ' : '') . ($a['p_ln'] ?? ''));
+        if ($ptName === '') {
+            $ptName = 'Patient ' . ($a['patient_id'] ?? '');
+        }
+        $docName = (string)($a['d_fn'] ?? '');
+        if ($docName !== '' && !str_starts_with($docName, 'Dr.')) {
+            $docName = 'Dr. ' . $docName;
+        }
         $appointments[] = [
             $a['slot_time'],
-            $a['patient_name'],
+            $ptName,
             $a['visit_type'],
             $a['status'],
             $a['complaint'],
-            $a['doctor_name'],
-            $a['department'],
+            $docName ?: 'Unassigned',
+            $a['department'] ?? 'Internal Medicine',
             $a['appt_date'],
             $a['patient_id'] ?? '',
         ];
     }
 
-    // 5. Admissions & Discharges
+    // 5. Admissions & Discharges (3NF joins)
     $admissions = [];
     $admittedRoomMap = [];
-    foreach ($pdo->query('SELECT * FROM admissions ORDER BY id DESC')->fetchAll() as $adIdx => $ad) {
+    $admStmt = $pdo->query('SELECT ad.*,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+        rm.ward as r_ward,
+        u.full_name as d_fn
+        FROM admissions ad
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(ad.mrn) OR UPPER(p.mrn) = UPPER(ad.mrn))
+        LEFT JOIN rooms rm ON UPPER(rm.room_number) = UPPER(ad.room_number)
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(ad.doctor_id)
+        ORDER BY ad.id DESC');
+    foreach ($admStmt->fetchAll() as $adIdx => $ad) {
         $admId = !empty($ad['admission_id']) ? (string) $ad['admission_id'] : ('ADM-' . str_pad((string) (1001 + (int) ($ad['id'] ?? $adIdx)), 4, '0', STR_PAD_LEFT));
         $cNotes = !empty($ad['clinical_notes_json']) ? (json_decode((string) $ad['clinical_notes_json'], true) ?: []) : [];
+        $ptName = trim(($ad['p_fn'] ?? '') . ' ' . (!empty($ad['p_mn']) ? $ad['p_mn'] . ' ' : '') . ($ad['p_ln'] ?? ''));
+        if ($ptName === '') {
+            $ptName = 'Patient ' . ($ad['mrn'] ?? '');
+        }
+        $docName = (string)($ad['d_fn'] ?? '');
+        if ($docName !== '' && !str_starts_with($docName, 'Dr.')) {
+            $docName = 'Dr. ' . $docName;
+        }
+        $ward = (string)($ad['r_ward'] ?: 'General Ward');
         $admissions[] = [
-            0                   => $ad['patient_name'],
+            0                   => $ptName,
             1                   => $ad['room_number'],
-            2                   => $ad['ward'],
+            2                   => $ward,
             3                   => $ad['admitted_date'],
-            4                   => $ad['doctor_name'],
+            4                   => $docName ?: 'Unassigned',
             5                   => $ad['reason'],
             6                   => $ad['status'] ?? 'Admitted',
             7                   => $ad['billing_clearance'] ?? 'Pending',
@@ -2098,14 +2213,14 @@ function db_load_state(): array
             10                  => (string) ($ad['clearance_reason'] ?? ''),
             11                  => $cNotes,
             'admission_id'      => $admId,
-            'patient_name'      => $ad['patient_name'],
+            'patient_name'      => $ptName,
             'mrn'               => $ad['mrn'] ?? '',
             'department'        => $ad['department'] ?? 'Internal Medicine',
             'room_number'       => $ad['room_number'],
             'bed_label'         => $ad['bed_label'] ?? 'Bed A',
-            'ward'              => $ad['ward'],
+            'ward'              => $ward,
             'admitted_date'     => $ad['admitted_date'],
-            'doctor_name'       => $ad['doctor_name'],
+            'doctor_name'       => $docName ?: 'Unassigned',
             'reason'            => $ad['reason'],
             'status'            => $ad['status'] ?? 'Admitted',
             'clinical_notes'    => $cNotes,
@@ -2115,8 +2230,8 @@ function db_load_state(): array
             'clearance_reason'  => (string) ($ad['clearance_reason'] ?? ''),
             'cleared_by'        => (string) ($ad['cleared_by'] ?? ''),
         ];
-        if (!empty($ad['room_number']) && !empty($ad['patient_name']) && $ad['patient_name'] !== '—') {
-            $admittedRoomMap[$ad['room_number']] = $ad['patient_name'];
+        if (!empty($ad['room_number']) && ($ad['status'] ?? 'Admitted') === 'Admitted' && $ptName !== '' && $ptName !== '—') {
+            $admittedRoomMap[$ad['room_number']] = $ptName;
         }
     }
     foreach ($rooms as &$rmRow) {
@@ -2133,65 +2248,119 @@ function db_load_state(): array
     unset($rmRow);
 
     $discharges = [];
-    foreach ($pdo->query('SELECT * FROM discharges ORDER BY id DESC')->fetchAll() as $dc) {
+    $dcStmt = $pdo->query('SELECT dc.*,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+        rm.ward as r_ward,
+        u.full_name as d_fn
+        FROM discharges dc
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(dc.mrn) OR UPPER(p.mrn) = UPPER(dc.mrn))
+        LEFT JOIN rooms rm ON UPPER(rm.room_number) = UPPER(dc.room_number)
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(dc.doctor_id)
+        ORDER BY dc.id DESC');
+    foreach ($dcStmt->fetchAll() as $dc) {
+        $ptName = trim(($dc['p_fn'] ?? '') . ' ' . (!empty($dc['p_mn']) ? $dc['p_mn'] . ' ' : '') . ($dc['p_ln'] ?? ''));
+        if ($ptName === '') {
+            $ptName = 'Patient ' . ($dc['mrn'] ?? '');
+        }
+        $docName = (string)($dc['d_fn'] ?? '');
+        if ($docName !== '' && !str_starts_with($docName, 'Dr.')) {
+            $docName = 'Dr. ' . $docName;
+        }
+        $ward = (string)($dc['r_ward'] ?: 'General Ward');
+        $los = 1;
+        if (!empty($dc['admitted_date']) && !empty($dc['discharged_date'])) {
+            $aTs = strtotime((string)$dc['admitted_date']);
+            $dTs = strtotime((string)$dc['discharged_date']);
+            if ($aTs > 0 && $dTs >= $aTs) {
+                $los = max(1, (int)ceil(($dTs - $aTs) / 86400));
+            }
+        }
         $discharges[] = [
-            0                 => $dc['patient_name'],
+            0                 => $ptName,
             1                 => $dc['room_number'],
-            2                 => $dc['ward'],
+            2                 => $ward,
             3                 => $dc['discharged_date'],
             4                 => $dc['proof_path'],
             5                 => (int) $dc['discharged_ts'],
-            'patient_name'    => $dc['patient_name'],
+            'patient_name'    => $ptName,
             'mrn'             => $dc['mrn'] ?? '',
             'room_number'     => $dc['room_number'],
             'bed_label'       => $dc['bed_label'] ?? 'Bed A',
-            'ward'            => $dc['ward'],
-            'doctor_name'     => $dc['doctor_name'] ?? '',
+            'ward'            => $ward,
+            'doctor_name'     => $docName ?: '',
             'admitted_date'   => $dc['admitted_date'] ?? '',
             'discharged_date' => $dc['discharged_date'],
             'discharge_type'  => $dc['discharge_type'] ?? 'Recovered / Improved',
             'final_diagnosis' => $dc['final_diagnosis'] ?? '',
-            'length_of_stay'  => max(1, (int) ($dc['length_of_stay'] ?? 1)),
+            'length_of_stay'  => $los,
             'proof_path'      => $dc['proof_path'],
             'discharged_ts'   => (int) $dc['discharged_ts'],
         ];
     }
 
-    // 6. Bills, Receipts & Payments
+    // 6. Bills, Receipts & Payments (3NF joins)
     $bills    = [];
     $receipts = [];
-    foreach ($pdo->query('SELECT * FROM bills ORDER BY id DESC')->fetchAll() as $idx => $b) {
+    $bStmt = $pdo->query('SELECT b.*,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln
+        FROM bills b
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(b.patient_id) OR UPPER(p.mrn) = UPPER(b.patient_id))
+        ORDER BY b.id DESC');
+    foreach ($bStmt->fetchAll() as $idx => $b) {
+        $ptName = trim(($b['p_fn'] ?? '') . ' ' . (!empty($b['p_mn']) ? $b['p_mn'] . ' ' : '') . ($b['p_ln'] ?? ''));
+        if ($ptName === '') {
+            $ptName = 'Patient ' . ($b['patient_id'] ?? '');
+        }
         $bNo    = !empty($b['bill_no']) ? (string) $b['bill_no'] : ('BILL-' . str_pad((string) (1000 + (int) ($b['id'] ?? ($idx + 1))), 4, '0', STR_PAD_LEFT));
         $bItems = !empty($b['items_json']) ? json_decode((string) $b['items_json'], true) : null;
         $bPaid  = isset($b['paid_amount']) && $b['paid_amount'] !== ''
             ? (float) preg_replace('/[^0-9.\-]/', '', (string) $b['paid_amount'])
             : (($b['status'] ?? '') === 'Paid' ? (float) preg_replace('/[^0-9.\-]/', '', (string) $b['amount']) : 0.0);
         $bills[] = normalize_bill_row([
-            $b['patient_name'],
+            $ptName,
             $b['amount'],
             $b['status'],
             $b['issued_date'],
             $bNo,
             $bPaid,
             is_array($bItems) && $bItems ? $bItems : null,
+            'patient_address' => $b['patient_address'] ?? null,
+            'patient_id'      => $b['patient_id'] ?? '',
         ], $idx);
         if (!empty($b['receipt_path'])) {
-            $receipts[$b['patient_name']] = $b['receipt_path'];
+            $receipts[$ptName] = $b['receipt_path'];
         }
     }
 
     $payments = [];
-    foreach ($pdo->query('SELECT * FROM payments ORDER BY id DESC')->fetchAll() as $py) {
+    $pyStmt = $pdo->query('SELECT py.*,
+        b.patient_id,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+        u.full_name as c_fn
+        FROM payments py
+        LEFT JOIN bills b ON UPPER(b.bill_no) = UPPER(py.bill_no)
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(b.patient_id) OR UPPER(p.mrn) = UPPER(b.patient_id))
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(py.cashier_id)
+        ORDER BY py.id DESC');
+    foreach ($pyStmt->fetchAll() as $py) {
+        $ptName = trim(($py['p_fn'] ?? '') . ' ' . (!empty($py['p_mn']) ? $py['p_mn'] . ' ' : '') . ($py['p_ln'] ?? ''));
+        if ($ptName === '') {
+            $ptName = 'Patient ' . ($py['patient_id'] ?? '');
+        }
+        $cashierName = (string)($py['c_fn'] ?: 'Hospital Cashier');
+        $amtPaid = parse_money($py['amount_paid'] ?? 0);
+        $amtRec  = parse_money($py['amount_received'] ?? 0);
+        $change  = max(0.0, $amtRec - $amtPaid);
         $payments[] = [
             'receipt_no'      => (string) ($py['receipt_no'] ?? 'OR-1001'),
             'bill_no'         => (string) ($py['bill_no'] ?? 'BILL-1001'),
-            'patient_name'    => (string) ($py['patient_name'] ?? '—'),
-            'amount_paid'     => parse_money($py['amount_paid'] ?? 0),
-            'amount_received' => parse_money($py['amount_received'] ?? 0),
-            'change_due'      => parse_money($py['change_due'] ?? 0),
+            'patient_name'    => $ptName,
+            'amount_paid'     => $amtPaid,
+            'amount_received' => $amtRec,
+            'change_due'      => $change,
             'payment_method'  => (string) ($py['payment_method'] ?? 'Cash'),
             'reference_no'    => (string) ($py['reference_no'] ?? ''),
-            'cashier_name'    => (string) ($py['cashier_name'] ?? 'Hospital Cashier'),
+            'cashier_name'    => $cashierName,
             'paid_date'       => (string) ($py['paid_date'] ?? date('Y-m-d')),
             'paid_at'         => (string) ($py['paid_at'] ?? date('M d, Y · H:i')),
             'items'           => !empty($py['items_json']) ? (json_decode((string) $py['items_json'], true) ?: []) : [],
@@ -2214,16 +2383,30 @@ function db_load_state(): array
         }
     }
 
-    // 7. Medical Records
+    // 7. Medical Records (3NF joins)
     $records = [];
-    foreach ($pdo->query('SELECT * FROM medical_records ORDER BY id DESC')->fetchAll() as $mr) {
-        $pt = $mr['patient_name'];
+    $mrStmt = $pdo->query('SELECT mr.*,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+        u.full_name as d_fn
+        FROM medical_records mr
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(mr.patient_id) OR UPPER(p.mrn) = UPPER(mr.patient_id))
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(mr.doctor_id)
+        ORDER BY mr.id DESC');
+    foreach ($mrStmt->fetchAll() as $mr) {
+        $pt = trim(($mr['p_fn'] ?? '') . ' ' . (!empty($mr['p_mn']) ? $mr['p_mn'] . ' ' : '') . ($mr['p_ln'] ?? ''));
+        if ($pt === '') {
+            $pt = 'Patient ' . ($mr['patient_id'] ?? '');
+        }
+        $docName = (string)($mr['d_fn'] ?? '');
+        if ($docName !== '' && !str_starts_with($docName, 'Dr.')) {
+            $docName = 'Dr. ' . $docName;
+        }
         $records[$pt][] = [
             'id'            => $mr['record_code'],
             'patient_id'    => $mr['patient_id'] ?? '',
             'patient_name'  => $pt,
             'doctor_id'     => $mr['doctor_id'] ?? '',
-            'doctor'        => $mr['doctor_name'],
+            'doctor'        => $docName ?: 'Attending Physician',
             'date'          => $mr['visit_date'],
             'visit_type'    => $mr['visit_type'],
             'complaint'     => $mr['complaint'],
@@ -2235,12 +2418,27 @@ function db_load_state(): array
         ];
     }
 
-    // 8. Lab Results
+    // 8. Lab Results (3NF joins)
     $labResults = [];
-    foreach ($pdo->query('SELECT * FROM lab_results ORDER BY id DESC')->fetchAll() as $lr) {
+    $lrStmt = $pdo->query('SELECT lr.*,
+        p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+        u.full_name as d_fn
+        FROM lab_results lr
+        LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(lr.patient_id) OR UPPER(p.mrn) = UPPER(lr.patient_id))
+        LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(lr.doctor_id)
+        ORDER BY lr.id DESC');
+    foreach ($lrStmt->fetchAll() as $lr) {
+        $lrPtName = trim(($lr['p_fn'] ?? '') . ' ' . (!empty($lr['p_mn']) ? $lr['p_mn'] . ' ' : '') . ($lr['p_ln'] ?? ''));
+        if ($lrPtName === '') {
+            $lrPtName = 'Patient ' . ($lr['patient_id'] ?? '');
+        }
+        $docName = (string)($lr['d_fn'] ?? '');
+        if ($docName !== '' && !str_starts_with($docName, 'Dr.')) {
+            $docName = 'Dr. ' . $docName;
+        }
         $labResults[] = [
             $lr['test_code'],
-            $lr['patient_name'],
+            $lrPtName,
             $lr['test_name'],
             $lr['status'],
             $lr['collected_date'],
@@ -2248,21 +2446,36 @@ function db_load_state(): array
             $lr['priority'] ?? 'Routine',
             $lr['clinical_notes'] ?? '',
             $lr['record_code'] ?? '',
-            $lr['doctor_name'] ?? '',
+            $docName ?: '',
             $lr['results_json'] ?? '',
         ];
     }
 
-    // 8b. Prescriptions
+    // 8b. Prescriptions (3NF joins)
     $prescriptions = [];
     try {
-        foreach ($pdo->query('SELECT * FROM prescriptions ORDER BY id DESC')->fetchAll() as $rx) {
+        $rxStmt = $pdo->query('SELECT rx.*,
+            p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
+            u.full_name as d_fn
+            FROM prescriptions rx
+            LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(rx.patient_id) OR UPPER(p.mrn) = UPPER(rx.patient_id))
+            LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(rx.doctor_id)
+            ORDER BY rx.id DESC');
+        foreach ($rxStmt->fetchAll() as $rx) {
+            $rxPtName = trim(($rx['p_fn'] ?? '') . ' ' . (!empty($rx['p_mn']) ? $rx['p_mn'] . ' ' : '') . ($rx['p_ln'] ?? ''));
+            if ($rxPtName === '') {
+                $rxPtName = 'Patient ' . ($rx['patient_id'] ?? '');
+            }
+            $docName = (string)($rx['d_fn'] ?? '');
+            if ($docName !== '' && !str_starts_with($docName, 'Dr.')) {
+                $docName = 'Dr. ' . $docName;
+            }
             $prescriptions[] = [
                 'rx_code'         => (string) $rx['rx_code'],
                 'record_code'     => (string) ($rx['record_code'] ?? ''),
                 'patient_id'      => (string) ($rx['patient_id'] ?? ''),
-                'patient_name'    => (string) $rx['patient_name'],
-                'doctor_name'     => (string) ($rx['doctor_name'] ?? ''),
+                'patient_name'    => $rxPtName,
+                'doctor_name'     => $docName ?: '',
                 'medication'      => (string) $rx['medication'],
                 'dosage'          => (string) ($rx['dosage'] ?? ''),
                 'frequency'       => (string) ($rx['frequency'] ?? ''),
@@ -2274,14 +2487,17 @@ function db_load_state(): array
     } catch (Throwable) {
     }
 
-    // 9. Roles from `roles` table (seeded on first run)
+    // 9. Roles from `roles` table (user_count computed dynamically in 3NF)
     $roles = [];
-    foreach ($pdo->query('SELECT * FROM roles ORDER BY id ASC')->fetchAll() as $rl) {
+    $rolesStmt = $pdo->query('SELECT r.*,
+        (SELECT COUNT(*) FROM user_roles ur WHERE UPPER(ur.role) = UPPER(r.role_name)) as u_count
+        FROM roles r ORDER BY r.id ASC');
+    foreach ($rolesStmt->fetchAll() as $rl) {
         $rName = strcasecmp((string) $rl['role_name'], 'Front desk') === 0 ? 'Staff' : (string) $rl['role_name'];
         $roles[] = [
             $rName,
             $rl['description'],
-            (int) $rl['user_count'],
+            (int) ($rl['u_count'] ?? 0),
             json_decode((string) $rl['permissions_json'], true) ?: [],
             $rl['icon'] ?: 'shield',
         ];
@@ -2366,6 +2582,44 @@ function db_load_state(): array
     ];
 }
 
+/** Helper to resolve Doctor user_id by name for 3NF foreign key references. */
+function db_resolve_doctor_id_by_name(PDO $pdo, ?string $docName): ?string
+{
+    if (empty($docName) || $docName === '—' || $docName === 'Unassigned') {
+        return null;
+    }
+    $clean = trim(preg_replace('/^Dr\.\s*/i', '', (string)$docName));
+    $stmt = $pdo->prepare('SELECT user_id FROM accounts WHERE role = "Doctor" AND (UPPER(full_name) = UPPER(:n1) OR UPPER(full_name) = UPPER(:n2)) LIMIT 1');
+    $stmt->execute([':n1' => $clean, ':n2' => $docName]);
+    $uid = $stmt->fetchColumn();
+    return $uid ?: null;
+}
+
+/** Helper to resolve Cashier user_id by name for 3NF foreign key references. */
+function db_resolve_cashier_id_by_name(PDO $pdo, ?string $cashierName): ?string
+{
+    if (empty($cashierName) || $cashierName === '—') {
+        return null;
+    }
+    $stmt = $pdo->prepare('SELECT user_id FROM accounts WHERE role = "Cashier" AND UPPER(full_name) = UPPER(:n) LIMIT 1');
+    $stmt->execute([':n' => trim((string)$cashierName)]);
+    $uid = $stmt->fetchColumn();
+    return $uid ?: null;
+}
+
+/** Helper to resolve Patient patient_id by name for 3NF foreign key references. */
+function db_resolve_patient_id_by_name(PDO $pdo, ?string $ptName): ?string
+{
+    if (empty($ptName) || $ptName === '—') {
+        return null;
+    }
+    $clean = strtoupper(trim((string)$ptName));
+    $stmt = $pdo->prepare('SELECT patient_id FROM patients WHERE UPPER(first_name || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || last_name) = :n OR UPPER(first_name || " " || last_name) = :n OR UPPER(patient_id) = :n OR UPPER(mrn) = :n LIMIT 1');
+    $stmt->execute([':n' => $clean]);
+    $pid = $stmt->fetchColumn();
+    return $pid ?: null;
+}
+
 /** Save the current in-memory state back to the relational database tables. */
 function db_save_state(array $state): void
 {
@@ -2374,12 +2628,11 @@ function db_save_state(array $state): void
     try {
         // Roles
         $pdo->exec('DELETE FROM roles');
-        $insRl = $pdo->prepare('INSERT INTO roles (role_name, description, user_count, permissions_json, icon) VALUES (:rn, :ds, :uc, :pm, :ic)');
+        $insRl = $pdo->prepare('INSERT INTO roles (role_name, description, permissions_json, icon) VALUES (:rn, :ds, :pm, :ic)');
         foreach ($state['roles'] ?? [] as $r) {
             $insRl->execute([
                 ':rn' => $r[0] ?? 'Role',
                 ':ds' => $r[1] ?? '',
-                ':uc' => (int) ($r[2] ?? 0),
                 ':pm' => json_encode($r[3] ?? []),
                 ':ic' => $r[4] ?? 'shield',
             ]);
@@ -2387,7 +2640,7 @@ function db_save_state(array $state): void
 
         // Patients
         $pdo->exec('DELETE FROM patients');
-        $insPt = $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, first_name, middle_name, last_name, full_name, birthdate, phone, email, insurance_no, avatar, sex, blood_type, address, country, province, city, barangay, street, postal_code, phone_verified, id_checked, consent_given, status, created_by, created_at, upgraded_by, upgraded_at, no_phone, contact_name, contact_relationship, contact_phone, contact_first_name, contact_middle_name, contact_last_name, contact_relationship_other) VALUES (:pid, :mrn, :reg, :fnm, :mnm, :lnm, :fn, :bd, :ph, :em, :in, :av, :sx, :bt, :ad, :co, :pr, :ci, :bg, :st, :pc, :pv, :idc, :con, :stt, :cb, :ca, :ub, :ua, :np, :cn, :cr, :cp, :cfn, :cmn, :cln, :cro)');
+        $insPt = $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, first_name, middle_name, last_name, birthdate, phone, email, insurance_no, avatar, sex, blood_type, country, province, city, barangay, street, postal_code, phone_verified, id_checked, consent_given, status, created_by, created_at, upgraded_by, upgraded_at, no_phone, contact_relationship, contact_phone, contact_first_name, contact_middle_name, contact_last_name, contact_relationship_other) VALUES (:pid, :mrn, :reg, :fnm, :mnm, :lnm, :bd, :ph, :em, :in, :av, :sx, :bt, :co, :pr, :ci, :bg, :st, :pc, :pv, :idc, :con, :stt, :cb, :ca, :ub, :ua, :np, :cr, :cp, :cfn, :cmn, :cln, :cro)');
         foreach (array_reverse($state['patients'] ?? []) as $idx => $p) {
             $pid   = (string) ($p[8] ?? ($p['patient_id'] ?? ''));
             $regSt = (string) ($p['registration_status'] ?? ($p['reg_status'] ?? ($p[10] ?? 'Registered')));
@@ -2423,7 +2676,6 @@ function db_save_state(array $state): void
                 ':fnm' => $fnm,
                 ':mnm' => $mnm,
                 ':lnm' => $lnm,
-                ':fn'  => $p[0] ?? '—',
                 ':bd'  => $p[1] ?? '—',
                 ':ph'  => $phoneVal,
                 ':em'  => $p['email'] ?? '',
@@ -2431,7 +2683,6 @@ function db_save_state(array $state): void
                 ':av'  => $p[4] ?? 'PT',
                 ':sx'  => $p[5] ?? 'Not specified',
                 ':bt'  => $p[6] ?? 'Not specified',
-                ':ad'  => $p[7] ?? '—',
                 ':co'  => $p['country'] ?? 'Philippines',
                 ':pr'  => $p['province'] ?? '',
                 ':ci'  => $p['city'] ?? '',
@@ -2447,7 +2698,6 @@ function db_save_state(array $state): void
                 ':ub'  => $p['upgraded_by'] ?? '',
                 ':ua'  => $p['upgraded_at'] ?? '',
                 ':np'  => $noPhoneVal,
-                ':cn'  => !empty($p['contact_name']) ? (string) $p['contact_name'] : null,
                 ':cr'  => !empty($p['contact_relationship']) ? (string) $p['contact_relationship'] : null,
                 ':cp'  => !empty($p['contact_phone']) ? (string) $p['contact_phone'] : null,
                 ':cfn' => !empty($p['contact_first_name']) ? (string) $p['contact_first_name'] : null,
@@ -2459,41 +2709,45 @@ function db_save_state(array $state): void
 
         // Departments
         $pdo->exec('DELETE FROM departments');
-        $insDp = $pdo->prepare('INSERT INTO departments (name, head_doctor, staff_count, location) VALUES (:n, :h, :s, :l)');
+        $insDp = $pdo->prepare('INSERT INTO departments (name, head_doctor_id, location) VALUES (:n, :h_id, :l)');
         foreach ($state['crud']['departments'] ?? [] as $d) {
-            $insDp->execute([':n' => $d[0], ':h' => $d[1] ?? 'Unassigned', ':s' => (string) ($d[2] ?? '0'), ':l' => $d[3] ?? 'Main Wing']);
+            $headDocName = $d[1] ?? '';
+            $headDocId = db_resolve_doctor_id_by_name($pdo, $headDocName);
+            $insDp->execute([
+                ':n'    => $d[0],
+                ':h_id' => $headDocId,
+                ':l'    => $d[3] ?? 'Main Wing'
+            ]);
         }
 
         // Rooms
         $pdo->exec('DELETE FROM rooms');
-        $insRm = $pdo->prepare('INSERT INTO rooms (room_number, ward, status, patient_name) VALUES (:r, :w, :s, :p)');
+        $insRm = $pdo->prepare('INSERT INTO rooms (room_number, ward, status) VALUES (:r, :w, :s)');
         foreach ($state['crud']['rooms'] ?? [] as $r) {
             $rPt = trim((string) ($r[3] ?? '—'));
-            if ($rPt === '') {
-                $rPt = '—';
-            }
-            $rSt = ($rPt !== '—') ? 'Occupied' : 'Available';
-            $insRm->execute([':r' => $r[0], ':w' => $r[1] ?? 'General Ward', ':s' => $rSt, ':p' => $rPt]);
+            $rSt = ($rPt !== '' && $rPt !== '—') ? 'Occupied' : 'Available';
+            $insRm->execute([':r' => $r[0], ':w' => $r[1] ?? 'General Ward', ':s' => $rSt]);
         }
 
         // Appointments
         $pdo->exec('DELETE FROM appointments');
-        $insAp = $pdo->prepare('INSERT INTO appointments (patient_id, slot_time, patient_name, visit_type, status, complaint, doctor_name, department, appt_date) VALUES (:pid, :tm, :pt, :vt, :st, :cp, :dr, :dp, :dt)');
+        $insAp = $pdo->prepare('INSERT INTO appointments (patient_id, slot_time, visit_type, status, complaint, doctor_id, department, appt_date) VALUES (:pid, :tm, :vt, :st, :cp, :did, :dp, :dt)');
         foreach ($state['appointments'] ?? [] as $a) {
             $ptName = (string) ($a[1] ?? '—');
             $ptId   = (string) ($a[8] ?? '');
             if ($ptId === '' && $ptName !== '—') {
                 $resolved = resolve_patient_identity($state, $ptName);
-                $ptId     = $resolved['id'];
+                $ptId     = $resolved['id'] ?? (db_resolve_patient_id_by_name($pdo, $ptName) ?? '');
             }
+            $docName = $a[5] ?? '—';
+            $docId   = (string)($a['doctor_id'] ?? '') ?: db_resolve_doctor_id_by_name($pdo, $docName);
             $insAp->execute([
-                ':pid' => $ptId,
+                ':pid' => $ptId ?: null,
                 ':tm'  => $a[0] ?? '09:00',
-                ':pt'  => $ptName,
                 ':vt'  => $a[2] ?? 'Consultation',
                 ':st'  => $a[3] ?? 'Scheduled',
                 ':cp'  => $a[4] ?? '',
-                ':dr'  => $a[5] ?? '—',
+                ':did' => $docId ?: null,
                 ':dp'  => $a[6] ?? 'Internal Medicine',
                 ':dt'  => $a[7] ?? date('M d, Y'),
             ]);
@@ -2501,18 +2755,18 @@ function db_save_state(array $state): void
 
         // Admissions
         $pdo->exec('DELETE FROM admissions');
-        $insAd = $pdo->prepare('INSERT INTO admissions (admission_id, patient_name, mrn, department, room_number, bed_label, ward, admitted_date, doctor_name, reason, status, clinical_notes_json, discharge_order, final_diagnosis, billing_clearance, clearance_reason, cleared_by) VALUES (:aid, :pt, :mrn, :dp, :rm, :bd, :wd, :dt, :dr, :rs, :st, :cn, :do, :fd, :bc, :cr, :cb)');
+        $insAd = $pdo->prepare('INSERT INTO admissions (admission_id, mrn, department, room_number, bed_label, admitted_date, doctor_id, reason, status, clinical_notes_json, discharge_order, final_diagnosis, billing_clearance, clearance_reason, cleared_by) VALUES (:aid, :mrn, :dp, :rm, :bd, :dt, :did, :rs, :st, :cn, :do, :fd, :bc, :cr, :cb)');
         foreach (array_reverse($state['admissions'] ?? []) as $adIdx => $ad) {
+            $docName = $ad['doctor_name'] ?? ($ad[4] ?? 'Unassigned');
+            $docId   = (string)($ad['doctor_id'] ?? '') ?: db_resolve_doctor_id_by_name($pdo, $docName);
             $insAd->execute([
                 ':aid' => $ad['admission_id'] ?? ('ADM-' . str_pad((string) (1001 + $adIdx), 4, '0', STR_PAD_LEFT)),
-                ':pt'  => $ad['patient_name'] ?? ($ad[0] ?? '—'),
                 ':mrn' => $ad['mrn'] ?? '',
                 ':dp'  => $ad['department'] ?? 'Internal Medicine',
                 ':rm'  => $ad['room_number'] ?? ($ad[1] ?? '—'),
                 ':bd'  => $ad['bed_label'] ?? 'Bed A',
-                ':wd'  => $ad['ward'] ?? ($ad[2] ?? 'General Ward'),
                 ':dt'  => $ad['admitted_date'] ?? ($ad[3] ?? date('M d, Y')),
-                ':dr'  => $ad['doctor_name'] ?? ($ad[4] ?? 'Unassigned'),
+                ':did' => $docId ?: null,
                 ':rs'  => $ad['reason'] ?? ($ad[5] ?? ''),
                 ':st'  => $ad['status'] ?? ($ad[6] ?? 'Admitted'),
                 ':cn'  => json_encode(!empty($ad['clinical_notes']) ? $ad['clinical_notes'] : (!empty($ad[11]) ? $ad[11] : [])),
@@ -2526,20 +2780,19 @@ function db_save_state(array $state): void
 
         // Discharges
         $pdo->exec('DELETE FROM discharges');
-        $insDc = $pdo->prepare('INSERT INTO discharges (patient_name, mrn, room_number, bed_label, ward, doctor_name, admitted_date, discharged_date, discharge_type, final_diagnosis, length_of_stay, proof_path, discharged_ts) VALUES (:pt, :mrn, :rm, :bd, :wd, :dr, :adt, :dt, :dtype, :fd, :los, :pf, :ts)');
+        $insDc = $pdo->prepare('INSERT INTO discharges (mrn, room_number, bed_label, doctor_id, admitted_date, discharged_date, discharge_type, final_diagnosis, proof_path, discharged_ts) VALUES (:mrn, :rm, :bd, :did, :adt, :dt, :dtype, :fd, :pf, :ts)');
         foreach ($state['discharges'] ?? [] as $dc) {
+            $docName = $dc['doctor_name'] ?? '';
+            $docId   = (string)($dc['doctor_id'] ?? '') ?: db_resolve_doctor_id_by_name($pdo, $docName);
             $insDc->execute([
-                ':pt'    => $dc['patient_name'] ?? ($dc[0] ?? '—'),
                 ':mrn'   => $dc['mrn'] ?? '',
                 ':rm'    => $dc['room_number'] ?? ($dc[1] ?? '—'),
                 ':bd'    => $dc['bed_label'] ?? 'Bed A',
-                ':wd'    => $dc['ward'] ?? ($dc[2] ?? 'General Ward'),
-                ':dr'    => $dc['doctor_name'] ?? '',
+                ':did'   => $docId ?: null,
                 ':adt'   => $dc['admitted_date'] ?? '',
                 ':dt'    => $dc['discharged_date'] ?? ($dc[3] ?? date('M d, Y')),
                 ':dtype' => $dc['discharge_type'] ?? 'Recovered / Improved',
                 ':fd'    => $dc['final_diagnosis'] ?? '',
-                ':los'   => max(1, (int) ($dc['length_of_stay'] ?? 1)),
                 ':pf'    => $dc['proof_path'] ?? ($dc[4] ?? null),
                 ':ts'    => (int) ($dc['discharged_ts'] ?? ($dc[5] ?? time())),
             ]);
@@ -2547,63 +2800,65 @@ function db_save_state(array $state): void
 
         // Bills
         $pdo->exec('DELETE FROM bills');
-        $insBl = $pdo->prepare('INSERT INTO bills (bill_no, patient_name, amount, paid_amount, status, issued_date, receipt_path, items_json) VALUES (:bn, :pt, :am, :pa, :st, :dt, :rc, :it)');
+        $insBl = $pdo->prepare('INSERT INTO bills (bill_no, patient_id, patient_address, amount, paid_amount, status, issued_date, receipt_path, items_json) VALUES (:bn, :pid, :pa_addr, :am, :pa, :st, :dt, :rc, :it)');
         foreach (array_reverse($state['bills'] ?? []) as $idx => $b) {
             $nb     = normalize_bill_row($b, $idx);
             $ptName = $nb[0];
+            $ptId   = (string)($nb['patient_id'] ?? ($b['patient_id'] ?? ''));
+            if ($ptId === '' && $ptName !== '—') {
+                $ptId = db_resolve_patient_id_by_name($pdo, $ptName) ?? '';
+            }
             $insBl->execute([
-                ':bn' => $nb[4],
-                ':pt' => $ptName,
-                ':am' => $nb[1],
-                ':pa' => number_format((float) $nb[5], 2, '.', ''),
-                ':st' => $nb[2],
-                ':dt' => $nb[3],
-                ':rc' => $state['receipts'][$ptName] ?? null,
-                ':it' => json_encode($nb[6] ?? []),
+                ':bn'      => $nb[4],
+                ':pid'     => $ptId ?: null,
+                ':pa_addr' => $nb['patient_address'] ?? ($b['patient_address'] ?? ($b[8] ?? null)),
+                ':am'      => $nb[1],
+                ':pa'      => number_format((float) $nb[5], 2, '.', ''),
+                ':st'      => $nb[2],
+                ':dt'      => $nb[3],
+                ':rc'      => $state['receipts'][$ptName] ?? null,
+                ':it'      => json_encode($nb[6] ?? []),
             ]);
         }
 
         // Payments
         $pdo->exec('DELETE FROM payments');
-        $insPy = $pdo->prepare('INSERT INTO payments (receipt_no, bill_no, patient_name, amount_paid, amount_received, change_due, payment_method, reference_no, cashier_name, paid_date, paid_at, items_json) VALUES (:rn, :bn, :pt, :ap, :ar, :cd, :pm, :rf, :cn, :pd, :pa, :it)');
+        $insPy = $pdo->prepare('INSERT INTO payments (receipt_no, bill_no, amount_paid, amount_received, payment_method, reference_no, cashier_id, paid_date, paid_at, items_json) VALUES (:rn, :bn, :ap, :ar, :pm, :rf, :cid, :pd, :pa, :it)');
         foreach (array_reverse($state['payments'] ?? []) as $py) {
+            $cashierName = $py['cashier_name'] ?? 'Hospital Cashier';
+            $cashierId   = (string)($py['cashier_id'] ?? '') ?: db_resolve_cashier_id_by_name($pdo, $cashierName);
             $insPy->execute([
-                ':rn' => $py['receipt_no'] ?? ('OR-' . rand(1000, 9999)),
-                ':bn' => $py['bill_no'] ?? 'BILL-1001',
-                ':pt' => $py['patient_name'] ?? '—',
-                ':ap' => number_format(parse_money($py['amount_paid'] ?? 0), 2, '.', ''),
-                ':ar' => number_format(parse_money($py['amount_received'] ?? 0), 2, '.', ''),
-                ':cd' => number_format(parse_money($py['change_due'] ?? 0), 2, '.', ''),
-                ':pm' => $py['payment_method'] ?? 'Cash',
-                ':rf' => $py['reference_no'] ?? '',
-                ':cn' => $py['cashier_name'] ?? 'Hospital Cashier',
-                ':pd' => $py['paid_date'] ?? date('Y-m-d'),
-                ':pa' => $py['paid_at'] ?? date('M d, Y · H:i'),
-                ':it' => json_encode($py['items'] ?? []),
+                ':rn'  => $py['receipt_no'] ?? ('OR-' . rand(1000, 9999)),
+                ':bn'  => $py['bill_no'] ?? 'BILL-1001',
+                ':ap'  => number_format(parse_money($py['amount_paid'] ?? 0), 2, '.', ''),
+                ':ar'  => number_format(parse_money($py['amount_received'] ?? 0), 2, '.', ''),
+                ':pm'  => $py['payment_method'] ?? 'Cash',
+                ':rf'  => $py['reference_no'] ?? '',
+                ':cid' => $cashierId ?: null,
+                ':pd'  => $py['paid_date'] ?? date('Y-m-d'),
+                ':pa'  => $py['paid_at'] ?? date('M d, Y · H:i'),
+                ':it'  => json_encode($py['items'] ?? []),
             ]);
         }
 
         // Medical Records
         $pdo->exec('DELETE FROM medical_records');
-        $insMr = $pdo->prepare('INSERT INTO medical_records (record_code, patient_id, patient_name, doctor_id, doctor_name, visit_date, visit_type, complaint, notes, diagnoses_json, prescriptions_json, lab_orders_json, status) VALUES (:rc, :pid, :pt, :did, :dr, :dt, :vt, :cp, :nt, :dg, :rx, :lb, :st)');
+        $insMr = $pdo->prepare('INSERT INTO medical_records (record_code, patient_id, doctor_id, visit_date, visit_type, complaint, notes, diagnoses_json, prescriptions_json, lab_orders_json, status) VALUES (:rc, :pid, :did, :dt, :vt, :cp, :nt, :dg, :rx, :lb, :st)');
         $allPrescriptionsToSave = [];
         foreach ($state['records'] ?? [] as $ptName => $recList) {
             $ptResolved = resolve_patient_identity($state, $ptName);
             foreach (array_reverse($recList) as $r) {
-                $recPtId   = !empty($r['patient_id']) ? (string) $r['patient_id'] : $ptResolved['id'];
-                $recPtName = !empty($r['patient_name']) ? (string) $r['patient_name'] : $ptName;
-                $recDocId  = (string) ($r['doctor_id'] ?? '');
-                $recDoc    = (string) ($r['doctor'] ?? '—');
+                $recPtId   = !empty($r['patient_id']) ? (string) $r['patient_id'] : ($ptResolved['id'] ?? db_resolve_patient_id_by_name($pdo, $ptName));
+                $recDocName = (string) ($r['doctor'] ?? '—');
+                $recDocId  = (string) ($r['doctor_id'] ?? '') ?: db_resolve_doctor_id_by_name($pdo, $recDocName);
                 $recCode   = $r['id'] ?? ('REC-' . rand(1000, 9999));
                 $recDate   = $r['date'] ?? date('M d, Y');
                 $recStatus = $r['status'] ?? 'Completed';
 
                 $insMr->execute([
                     ':rc'  => $recCode,
-                    ':pid' => $recPtId,
-                    ':pt'  => $recPtName,
-                    ':did' => $recDocId,
-                    ':dr'  => $recDoc,
+                    ':pid' => $recPtId ?: null,
+                    ':did' => $recDocId ?: null,
                     ':dt'  => $recDate,
                     ':vt'  => $r['visit_type'] ?? 'Consultation',
                     ':cp'  => $r['complaint'] ?? '',
@@ -2622,8 +2877,7 @@ function db_save_state(array $state): void
                             'rx_code'         => 'RX-' . strtoupper(substr(md5($recCode . '_' . $med . '_' . $rxIdx), 0, 6)),
                             'record_code'     => $recCode,
                             'patient_id'      => $recPtId,
-                            'patient_name'    => $recPtName,
-                            'doctor_name'     => $recDoc,
+                            'doctor_id'       => $recDocId,
                             'medication'      => $med,
                             'dosage'          => (string) ($rx[1] ?? 'As directed'),
                             'frequency'       => (string) ($rx[2] ?? 'Once daily'),
@@ -2639,19 +2893,20 @@ function db_save_state(array $state): void
         // Dedicated Prescriptions Table
         try {
             $pdo->exec('DELETE FROM prescriptions');
-            $insRx = $pdo->prepare('INSERT INTO prescriptions (rx_code, record_code, patient_id, patient_name, doctor_name, medication, dosage, frequency, duration, prescribed_date, status) VALUES (:rc, :rec, :pid, :pt, :dr, :md, :ds, :fq, :du, :dt, :st)');
+            $insRx = $pdo->prepare('INSERT INTO prescriptions (rx_code, record_code, patient_id, doctor_id, medication, dosage, frequency, duration, prescribed_date, status) VALUES (:rc, :rec, :pid, :did, :md, :ds, :fq, :du, :dt, :st)');
             // Also merge any standalone $state['prescriptions']
             foreach ($state['prescriptions'] ?? [] as $stRx) {
                 $stMed = trim((string) ($stRx['medication'] ?? ($stRx['med'] ?? '')));
                 if ($stMed === '' || $stMed === 'Select medication') {
                     continue;
                 }
+                $stPtId = (string)($stRx['patient_id'] ?? '') ?: db_resolve_patient_id_by_name($pdo, $stRx['patient_name'] ?? '');
+                $stDocId = (string)($stRx['doctor_id'] ?? '') ?: db_resolve_doctor_id_by_name($pdo, $stRx['doctor_name'] ?? ($stRx['doctor'] ?? ''));
                 $allPrescriptionsToSave[] = [
                     'rx_code'         => $stRx['rx_code'] ?? ('RX-' . rand(1000, 9999)),
                     'record_code'     => $stRx['record_code'] ?? '',
-                    'patient_id'      => $stRx['patient_id'] ?? '',
-                    'patient_name'    => $stRx['patient_name'] ?? '—',
-                    'doctor_name'     => $stRx['doctor_name'] ?? ($stRx['doctor'] ?? '—'),
+                    'patient_id'      => $stPtId,
+                    'doctor_id'       => $stDocId,
                     'medication'      => $stMed,
                     'dosage'          => $stRx['dosage'] ?? 'As directed',
                     'frequency'       => $stRx['frequency'] ?? 'Once daily',
@@ -2669,9 +2924,8 @@ function db_save_state(array $state): void
                 $insRx->execute([
                     ':rc'  => $rxItem['rx_code'],
                     ':rec' => $rxItem['record_code'],
-                    ':pid' => $rxItem['patient_id'],
-                    ':pt'  => $rxItem['patient_name'],
-                    ':dr'  => $rxItem['doctor_name'],
+                    ':pid' => $rxItem['patient_id'] ?: null,
+                    ':did' => $rxItem['doctor_id'] ?: null,
                     ':md'  => $rxItem['medication'],
                     ':ds'  => $rxItem['dosage'],
                     ':fq'  => $rxItem['frequency'],
@@ -2685,20 +2939,21 @@ function db_save_state(array $state): void
 
         // Lab Results
         $pdo->exec('DELETE FROM lab_results');
-        $insLr = $pdo->prepare('INSERT INTO lab_results (test_code, record_code, patient_id, patient_name, doctor_name, test_name, priority, status, clinical_notes, results_json, collected_date) VALUES (:tc, :rec, :pid, :pt, :dr, :tn, :pr, :st, :nt, :rj, :dt)');
+        $insLr = $pdo->prepare('INSERT INTO lab_results (test_code, record_code, patient_id, doctor_id, test_name, priority, status, clinical_notes, results_json, collected_date) VALUES (:tc, :rec, :pid, :did, :tn, :pr, :st, :nt, :rj, :dt)');
         foreach (array_reverse($state['lab_results'] ?? []) as $lr) {
             $lrPtName = (string) ($lr[1] ?? '—');
             $lrPtId   = (string) ($lr[5] ?? '');
             if ($lrPtId === '' && $lrPtName !== '—') {
                 $resolved = resolve_patient_identity($state, $lrPtName);
-                $lrPtId   = $resolved['id'];
+                $lrPtId   = $resolved['id'] ?? (db_resolve_patient_id_by_name($pdo, $lrPtName) ?? '');
             }
+            $docName = (string) ($lr[9] ?? '');
+            $docId   = (string)($lr['doctor_id'] ?? '') ?: db_resolve_doctor_id_by_name($pdo, $docName);
             $insLr->execute([
                 ':tc'  => $lr[0] ?? 'LAB-0000',
                 ':rec' => (string) ($lr[8] ?? ''),
-                ':pid' => $lrPtId,
-                ':pt'  => $lrPtName,
-                ':dr'  => (string) ($lr[9] ?? ''),
+                ':pid' => $lrPtId ?: null,
+                ':did' => $docId ?: null,
                 ':tn'  => $lr[2] ?? 'Test',
                 ':pr'  => (string) ($lr[6] ?? 'Routine'),
                 ':st'  => $lr[3] ?? 'Pending',
@@ -2753,38 +3008,52 @@ function db_find_account_by_id(string $userId): ?array
         return null;
     }
 
+    $formatAccRow = static function (?array $row): ?array {
+        if (!$row) {
+            return null;
+        }
+        if (!isset($row['address'])) {
+            $uParts = array_filter([$row['street'] ?? '', $row['barangay'] ?? '', $row['city'] ?? '', $row['province'] ?? '', $row['country'] ?? ''], fn($x) => trim((string)$x) !== '');
+            $row['address'] = !empty($uParts) ? implode(', ', $uParts) : '—';
+        }
+        if (!isset($row['user_role_label'])) {
+            $row['user_role_label'] = $row['role'] ?? 'Staff';
+        }
+        return $row;
+    };
+
     $stmt = $pdo->prepare('SELECT * FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
     $stmt->execute([':uid' => $raw]);
     if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        return $row;
+        return $formatAccRow($row);
     }
 
     if (preg_match('/^([ASDPC])-?0*(\d+)$/i', $raw, $m)) {
         $formatted = strtoupper($m[1]) . '-' . str_pad((string) ((int) $m[2]), 4, '0', STR_PAD_LEFT);
         $stmt->execute([':uid' => $formatted]);
         if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            return $row;
+            return $formatAccRow($row);
         }
     }
 
     if ($raw === 'ADMIN' || $raw === 'ADMINISTRATOR') {
         $stmt = $pdo->query("SELECT * FROM accounts WHERE role = 'Admin' LIMIT 1");
         if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            return $row;
+            return $formatAccRow($row);
         }
     }
 
     $stmt = $pdo->prepare('SELECT * FROM accounts WHERE LOWER(username) = LOWER(:u) LIMIT 1');
     $stmt->execute([':u' => trim($userId)]);
     if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        return $row;
+        return $formatAccRow($row);
     }
 
     if (str_contains($userId, '@')) {
         $stmt = $pdo->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:e) LIMIT 1');
         $stmt->execute([':e' => strtolower(trim($userId))]);
         if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            return $row;
+            return $formatAccRow($row);
         }
     }
 
@@ -2837,25 +3106,79 @@ function db_get_account_linked_patients(string $accountUid): array
     if ($auid === '') {
         return [];
     }
-    $stmt = $pdo->prepare('SELECT l.*, p.avatar, p.birthdate, p.sex, p.blood_type, p.status as patient_status
+    $stmt = $pdo->prepare('SELECT l.id, l.account_uid, l.patient_id, l.relationship_label, l.is_primary, l.linked_at, l.linked_by, l.unlinked_at,
+        p.mrn,
+        TRIM(p.first_name || " " || (CASE WHEN p.middle_name IS NOT NULL AND p.middle_name != "" THEN p.middle_name || " " ELSE "" END) || p.last_name) AS patient_name,
+        p.avatar, p.birthdate, p.sex, p.blood_type, p.status as patient_status, p.registration_status
         FROM patient_account_links l
-        LEFT JOIN patients p ON UPPER(p.patient_id) = UPPER(l.patient_id)
+        INNER JOIN patients p ON (UPPER(p.patient_id) = UPPER(l.patient_id) OR UPPER(p.mrn) = UPPER(l.patient_id))
         WHERE UPPER(l.account_uid) = :auid
+          AND (l.unlinked_at IS NULL OR l.unlinked_at = "")
+          AND (p.status IS NULL OR p.status != "Archived")
+          AND (p.registration_status IS NULL OR p.registration_status = "Registered")
         ORDER BY l.is_primary DESC, l.id ASC');
     $stmt->execute([':auid' => $auid]);
     $links = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // If no links found but the account is a Patient, auto-link to their self record
+    // If no links found but the account is a primary Patient account, auto-link to their self record
     if (empty($links)) {
-        $pQuery = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND no_phone = 0 AND registration_status = "Registered" LIMIT 1');
-        $pQuery->execute([':pid' => $auid]);
-        if ($pt = $pQuery->fetch(PDO::FETCH_ASSOC)) {
-            db_link_patient_to_account($auid, $pt['patient_id'], 'Me', true, 'Self-Service');
-            return db_get_account_linked_patients($auid);
-        }
+        try {
+            $accStmt = $pdo->prepare('SELECT role, full_name FROM accounts WHERE UPPER(user_id) = :auid LIMIT 1');
+            $accStmt->execute([':auid' => $auid]);
+            $accRow = $accStmt->fetch(PDO::FETCH_ASSOC);
+            if ($accRow && $accRow['role'] === 'Patient') {
+                $mrnEquiv = str_replace('P-', 'MRN-', $auid);
+                $pQuery = $pdo->prepare('SELECT *, TRIM(first_name || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || last_name) AS full_name FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me OR UPPER(TRIM(first_name || " " || last_name)) = :fn) AND no_phone = 0 AND (registration_status = "Registered" OR registration_status IS NULL) AND (status IS NULL OR status != "Archived") LIMIT 1');
+                $pQuery->execute([':pid' => $auid, ':me' => $mrnEquiv, ':fn' => strtoupper((string) $accRow['full_name'])]);
+                if ($pt = $pQuery->fetch(PDO::FETCH_ASSOC)) {
+                    db_link_patient_to_account($auid, $pt['patient_id'], 'Self', true, 'Self-Service');
+                    $stmt->execute([':auid' => $auid]);
+                    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+                }
+            }
+        } catch (Throwable) {}
     }
 
     return $links;
+}
+
+/**
+ * Check if an account already has a linked patient record with the same birthdate
+ * and the same or very similar full name (Item 4).
+ */
+function db_find_duplicate_linked_patient(string $accountUid, string $fullName, string $birthdate): ?array
+{
+    $linked = db_get_account_linked_patients($accountUid);
+    if (empty($linked)) {
+        return null;
+    }
+
+    $cTarget = strtolower(trim(preg_replace('/\s+/', ' ', $fullName)));
+
+    foreach ($linked as $lr) {
+        $lrBdate = (string) ($lr['birthdate'] ?? '');
+        if (!match_birthdates($birthdate, $lrBdate)) {
+            continue;
+        }
+
+        $lrName = strtolower(trim(preg_replace('/\s+/', ' ', (string) $lr['patient_name'])));
+        if ($cTarget === $lrName) {
+            return $lr;
+        }
+
+        similar_text($cTarget, $lrName, $pct);
+        if ($pct >= 75.0) {
+            return $lr;
+        }
+
+        $p1 = explode(' ', $cTarget);
+        $p2 = explode(' ', $lrName);
+        if (count($p1) >= 2 && count($p2) >= 2 && $p1[0] === $p2[0] && end($p1) === end($p2)) {
+            return $lr;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -2868,14 +3191,54 @@ function db_is_patient_linked(string $accountUid, string $patientId): bool
     if ($auid === '' || $pid === '') {
         return false;
     }
-    if ($auid === $pid) {
-        return true;
-    }
+
     $pdo = db();
-    $stmt = $pdo->prepare('SELECT id FROM patient_account_links
-        WHERE UPPER(account_uid) = :auid AND (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) LIMIT 1');
+    $stmt = $pdo->prepare('SELECT l.id FROM patient_account_links l
+        INNER JOIN patients p ON (UPPER(p.patient_id) = UPPER(l.patient_id) OR UPPER(p.mrn) = UPPER(l.patient_id))
+        WHERE UPPER(l.account_uid) = :auid 
+          AND (UPPER(l.patient_id) = :pid OR UPPER(p.mrn) = :pid)
+          AND (l.unlinked_at IS NULL OR l.unlinked_at = "")
+          AND (p.status IS NULL OR p.status != "Archived")
+          AND (p.registration_status IS NULL OR p.registration_status = "Registered")
+        LIMIT 1');
     $stmt->execute([':auid' => $auid, ':pid' => $pid]);
     return (bool) $stmt->fetchColumn();
+}
+
+/**
+ * Unlink a patient record from an account by setting unlinked_at.
+ */
+function db_unlink_patient_from_account(string $accountUid, string $patientId, ?string $reason = null): bool
+{
+    $auid = strtoupper(trim($accountUid));
+    $pid  = strtoupper(trim($patientId));
+    if ($auid === '' || $pid === '') {
+        return false;
+    }
+    $pdo = db();
+    $now = date('Y-m-d H:i:s');
+    $stmt = $pdo->prepare('UPDATE patient_account_links 
+        SET unlinked_at = :uat 
+        WHERE UPPER(account_uid) = :auid 
+          AND (UPPER(patient_id) = :pid OR UPPER(patient_id) IN (SELECT UPPER(patient_id) FROM patients WHERE UPPER(mrn) = :pid)) 
+          AND (unlinked_at IS NULL OR unlinked_at = "")');
+    $stmt->execute([
+        ':uat'  => $now,
+        ':auid' => $auid,
+        ':pid'  => $pid,
+    ]);
+    $affected = $stmt->rowCount();
+
+    // Check if user has any remaining active links
+    $remaining = db_get_account_linked_patients($auid);
+    if (empty($remaining)) {
+        try {
+            $del = $pdo->prepare('DELETE FROM user_roles WHERE UPPER(user_id) = :uid AND role = "Patient"');
+            $del->execute([':uid' => $auid]);
+        } catch (Throwable) {}
+    }
+
+    return $affected > 0;
 }
 
 /**
@@ -2904,8 +3267,6 @@ function db_link_patient_to_account(string $accountUid, string $patientId, strin
     }
 
     $realPid  = (string) $pt['patient_id'];
-    $mrn      = (string) ($pt['mrn'] ?: $realPid);
-    $fullName = (string) $pt['full_name'];
 
     // Check if already linked
     $chk = $pdo->prepare('SELECT id FROM patient_account_links WHERE UPPER(account_uid) = :auid AND UPPER(patient_id) = :pid LIMIT 1');
@@ -2914,18 +3275,20 @@ function db_link_patient_to_account(string $accountUid, string $patientId, strin
         return true;
     }
 
-    $ins = $pdo->prepare('INSERT INTO patient_account_links (account_uid, patient_id, mrn, patient_name, relationship_label, is_primary, linked_at, linked_by)
-        VALUES (:auid, :pid, :mrn, :pname, :rel, :prm, :lat, :lby)');
-    return $ins->execute([
+    $ins = $pdo->prepare('INSERT INTO patient_account_links (account_uid, patient_id, relationship_label, is_primary, linked_at, linked_by)
+        VALUES (:auid, :pid, :rel, :prm, :lat, :lby)');
+    $ok = $ins->execute([
         ':auid'  => $auid,
         ':pid'   => $realPid,
-        ':mrn'   => $mrn,
-        ':pname' => $fullName,
         ':rel'   => $relationship !== '' ? $relationship : 'Dependent',
         ':prm'   => $isPrimary ? 1 : 0,
         ':lat'   => date('Y-m-d H:i:s'),
         ':lby'   => $linkedBy,
     ]);
+    if ($ok) {
+        db_add_user_role($auid, 'Patient');
+    }
+    return $ok;
 }
 
 /**
@@ -2977,4 +3340,531 @@ function db_get_unlinked_patients_by_phone(string $phone, string $accountUid): a
         }
     }
     return $unlinked;
+}
+
+/**
+ * Get all roles for a given user account.
+ * Admin accounts cannot hold the Patient role.
+ *
+ * @return string[] Array of roles, e.g. ['Staff', 'Patient']
+ */
+function db_get_user_roles(string $userId): array
+{
+    $uid = trim($userId);
+    if ($uid === '') {
+        return [];
+    }
+    $pdo = db();
+    try {
+        $stmt = $pdo->prepare('SELECT role FROM user_roles WHERE UPPER(user_id) = :uid ORDER BY id ASC');
+        $stmt->execute([':uid' => strtoupper($uid)]);
+        $roles = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    } catch (Throwable) {
+        $roles = [];
+    }
+
+    if (empty($roles)) {
+        // Fallback to accounts table
+        try {
+            $stmt = $pdo->prepare('SELECT role FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
+            $stmt->execute([':uid' => strtoupper($uid)]);
+            $r = $stmt->fetchColumn();
+            if ($r) {
+                $roles = [(string) $r];
+                // Insert into user_roles
+                try {
+                    $ins = $pdo->prepare('INSERT INTO user_roles (user_id, role, created_at) VALUES (:uid, :r, :ca)');
+                    $ins->execute([':uid' => $uid, ':r' => (string) $r, ':ca' => date('Y-m-d H:i:s')]);
+                } catch (Throwable) {}
+            }
+        } catch (Throwable) {}
+    }
+
+    return array_values(array_unique(array_filter($roles)));
+}
+
+/**
+ * Check if a user holds a specific role.
+ */
+function db_user_has_role(string $userId, string $role): bool
+{
+    $roles = db_get_user_roles($userId);
+    return in_array($role, $roles, true);
+}
+
+/**
+ * Add a role to a user.
+ */
+function db_add_user_role(string $userId, string $role): bool
+{
+    $uid = trim($userId);
+    $role = trim($role);
+    if ($uid === '' || $role === '') {
+        return false;
+    }
+
+    $pdo = db();
+    try {
+        $stmt = $pdo->prepare('SELECT id FROM user_roles WHERE UPPER(user_id) = :uid AND role = :r LIMIT 1');
+        $stmt->execute([':uid' => strtoupper($uid), ':r' => $role]);
+        if ($stmt->fetch()) {
+            return true;
+        }
+        $ins = $pdo->prepare('INSERT INTO user_roles (user_id, role, created_at) VALUES (:uid, :r, :ca)');
+        return $ins->execute([':uid' => $uid, ':r' => $role, ':ca' => date('Y-m-d H:i:s')]);
+    } catch (Throwable) {
+        return false;
+    }
+}
+
+/**
+ * Remove a role from a user.
+ */
+function db_remove_user_role(string $userId, string $role): bool
+{
+    $uid = trim($userId);
+    $role = trim($role);
+    if ($uid === '' || $role === '') {
+        return false;
+    }
+    try {
+        $pdo = db();
+        $stmt = $pdo->prepare('DELETE FROM user_roles WHERE UPPER(user_id) = :uid AND role = :r');
+        return $stmt->execute([':uid' => strtoupper($uid), ':r' => $role]);
+    } catch (Throwable) {
+        return false;
+    }
+}
+
+/**
+ * Build the list of available portals on the server, for every request (Rule 2):
+ * - Employee portal (Staff / Doctor / Cashier / Admin): only if the user has that role in user_roles.
+ * - "My patient records" (Patient portal): only if the user has at least one ACTIVE row in patient_account_links
+ *   (unlinked_at is null) pointing to a Registered patient. Having the Patient role alone is not enough.
+ * - If the user has no active linked record, the Patient portal is not available at all.
+ *
+ * @return string[] Array of available portals, e.g. ['Admin'], ['Doctor', 'Patient'], ['Patient']
+ */
+function db_get_available_portals(string $userId): array
+{
+    $uid = trim($userId);
+    if ($uid === '') {
+        return [];
+    }
+    $pdo = db();
+
+    // 1. Employee portals: Admin, Doctor, Staff, Cashier
+    // Only if the user has that role in user_roles
+    $employeeRoles = [];
+    try {
+        $stmt = $pdo->prepare('SELECT role FROM user_roles WHERE UPPER(user_id) = :uid ORDER BY id ASC');
+        $stmt->execute([':uid' => strtoupper($uid)]);
+        $rolesFromDb = $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+        foreach ($rolesFromDb as $r) {
+            if (in_array($r, ['Admin', 'Doctor', 'Staff', 'Cashier'], true) && !in_array($r, $employeeRoles, true)) {
+                $employeeRoles[] = $r;
+            }
+        }
+    } catch (Throwable) {}
+
+    // Fallback to accounts primary role if user_roles has no employee role
+    if (empty($employeeRoles)) {
+        try {
+            $stmt = $pdo->prepare('SELECT role FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
+            $stmt->execute([':uid' => strtoupper($uid)]);
+            $primRole = (string) $stmt->fetchColumn();
+            if (in_array($primRole, ['Admin', 'Doctor', 'Staff', 'Cashier'], true)) {
+                $employeeRoles[] = $primRole;
+                try {
+                    $ins = $pdo->prepare('INSERT INTO user_roles (user_id, role, created_at) VALUES (:uid, :r, :ca)');
+                    $ins->execute([':uid' => $uid, ':r' => $primRole, ':ca' => date('Y-m-d H:i:s')]);
+                } catch (Throwable) {}
+            }
+        } catch (Throwable) {}
+    }
+
+    // 2. "My patient records" (Patient portal):
+    // Only if user has at least one ACTIVE row in patient_account_links (unlinked_at is null)
+    // pointing to a Registered patient. Having the Patient role alone is not enough.
+    $activePatients = db_get_account_linked_patients($uid);
+    $hasActiveLink  = !empty($activePatients);
+
+    $portals = $employeeRoles;
+    if ($hasActiveLink) {
+        $portals[] = 'Patient';
+        // Ensure user_roles has Patient entry
+        try {
+            $chk = $pdo->prepare('SELECT id FROM user_roles WHERE UPPER(user_id) = :uid AND role = "Patient" LIMIT 1');
+            $chk->execute([':uid' => strtoupper($uid)]);
+            if (!$chk->fetch()) {
+                $ins = $pdo->prepare('INSERT INTO user_roles (user_id, role, created_at) VALUES (:uid, "Patient", :ca)');
+                $ins->execute([':uid' => $uid, ':ca' => date('Y-m-d H:i:s')]);
+            }
+        } catch (Throwable) {}
+    } else {
+        // If no active linked records, purge any stale 'Patient' in user_roles
+        try {
+            $del = $pdo->prepare('DELETE FROM user_roles WHERE UPPER(user_id) = :uid AND role = "Patient"');
+            $del->execute([':uid' => strtoupper($uid)]);
+        } catch (Throwable) {}
+    }
+
+    return array_values(array_unique($portals));
+}
+
+/**
+ * Get all patient IDs and MRNs linked to a given user account.
+ *
+ * @return string[] Array of uppercase IDs / MRNs
+ */
+function db_get_account_linked_patient_ids(string $userId): array
+{
+    $uid = strtoupper(trim($userId));
+    if ($uid === '') {
+        return [];
+    }
+
+    $pdo = db();
+    $ids = [];
+
+    // 1. Check patient_account_links
+    try {
+        $stmt = $pdo->prepare('SELECT patient_id, mrn FROM patient_account_links WHERE UPPER(account_uid) = :uid AND (unlinked_at IS NULL OR unlinked_at = "")');
+        $stmt->execute([':uid' => $uid]);
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            if (!empty($row['patient_id'])) {
+                $ids[] = strtoupper(trim((string) $row['patient_id']));
+            }
+            if (!empty($row['mrn'])) {
+                $ids[] = strtoupper(trim((string) $row['mrn']));
+            }
+        }
+    } catch (Throwable) {}
+
+    // 2. Check if the user account itself matches a patient ID or MRN
+    $ids[] = $uid;
+    if (preg_match('/^P-0*(\d+)$/i', $uid, $m)) {
+        $ids[] = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+    } elseif (preg_match('/^MRN-0*(\d+)$/i', $uid, $m)) {
+        $ids[] = 'P-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+    }
+
+    // 3. Check if account phone matches any registered patient
+    try {
+        $acc = db_find_account_by_id($uid);
+        $cleanPhone = preg_replace('/[^0-9]/', '', (string) ($acc['phone'] ?? ''));
+        if (strlen($cleanPhone) >= 10) {
+            $pStmt = $pdo->prepare('SELECT patient_id, mrn FROM patients WHERE (phone = :ph OR phone LIKE :p10) AND (status != "Archived" OR status IS NULL)');
+            $pStmt->execute([':ph' => $cleanPhone, ':p10' => '%' . substr($cleanPhone, -10)]);
+            while ($pRow = $pStmt->fetch(PDO::FETCH_ASSOC)) {
+                if (!empty($pRow['patient_id'])) {
+                    $ids[] = strtoupper(trim((string) $pRow['patient_id']));
+                }
+                if (!empty($pRow['mrn'])) {
+                    $ids[] = strtoupper(trim((string) $pRow['mrn']));
+                }
+            }
+        }
+    } catch (Throwable) {}
+
+    return array_values(array_unique(array_filter($ids)));
+}
+
+/**
+ * Check if a patient record belongs to or is linked to the logged-in user account.
+ * (Conflict of Interest enforcement)
+ */
+function db_is_patient_conflict_of_interest(string $userId, string $patientIdOrMrn): bool
+{
+    $uid = trim($userId);
+    $target = strtoupper(trim($patientIdOrMrn));
+    if ($uid === '' || $target === '' || $target === '-' || $target === 'PROV-') {
+        return false;
+    }
+
+    $linkedIds = db_get_account_linked_patient_ids($uid);
+    $targetNorm = str_replace('MRN-', 'P-', $target);
+
+    foreach ($linkedIds as $lid) {
+        $lidNorm = str_replace('MRN-', 'P-', $lid);
+        if ($target === $lid || $targetNorm === $lidNorm) {
+            return true;
+        }
+        if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $target, $m1) && preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $lid, $m2)) {
+            if ((int) $m1[1] === (int) $m2[1]) {
+                return true;
+            }
+        }
+    }
+
+    // Also check patient record by ID, MRN, or Full Name against linked patients and user full name
+    try {
+        $pdo = db();
+        $pStmt = $pdo->prepare('SELECT full_name, patient_id, mrn FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(full_name) = :pid LIMIT 1');
+        $pStmt->execute([':pid' => $target]);
+        $pt = $pStmt->fetch(PDO::FETCH_ASSOC);
+        if ($pt) {
+            $ptMrn = strtoupper(trim((string) ($pt['mrn'] ?? '')));
+            $ptPid = strtoupper(trim((string) ($pt['patient_id'] ?? '')));
+            foreach ($linkedIds as $lid) {
+                if (($ptMrn !== '' && $ptMrn === $lid) || ($ptPid !== '' && $ptPid === $lid)) {
+                    return true;
+                }
+            }
+            $acc = db_find_account_by_id($uid);
+            if ($acc && !empty($acc['full_name']) && !empty($pt['full_name']) && strcasecmp(trim($acc['full_name']), trim($pt['full_name'])) === 0) {
+                return true;
+            }
+        }
+    } catch (Throwable) {}
+
+    return false;
+}
+
+/**
+ * Check if a price list item is charged on any bill belonging to the user or their linked dependents.
+ */
+function db_is_item_charged_on_user_bills(string $userId, string $itemNameOrPriceId): bool
+{
+    $linkedPts = db_get_account_linked_patient_ids($userId);
+    if (empty($linkedPts)) {
+        return false;
+    }
+    $state = &state();
+    $target = strtolower(trim($itemNameOrPriceId));
+    if ($target === '') {
+        return false;
+    }
+    foreach ($state['bills'] ?? [] as $i => $b) {
+        $nb = normalize_bill_row($b, $i);
+        $ptNorm = strtoupper(trim($nb['patient']));
+        $matchesPt = false;
+        foreach ($linkedPts as $lid) {
+            if ($ptNorm === $lid || str_contains($ptNorm, $lid)) {
+                $matchesPt = true;
+                break;
+            }
+        }
+        if (!$matchesPt && function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest($userId, $nb['patient'])) {
+            $matchesPt = true;
+        }
+        if ($matchesPt) {
+            foreach ($nb['items'] as $item) {
+                $desc = strtolower((string) ($item[0] ?? ''));
+                if (str_contains($desc, $target) || $desc === $target) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Check if a room/bed is charged on any admission or bill belonging to the user or their linked dependents.
+ */
+function db_is_room_charged_on_user_bills(string $userId, string $bedOrRoomNo): bool
+{
+    $linkedPts = db_get_account_linked_patient_ids($userId);
+    if (empty($linkedPts)) {
+        return false;
+    }
+    $state = &state();
+    $target = strtolower(trim($bedOrRoomNo));
+    if ($target === '') {
+        return false;
+    }
+    foreach ($state['admissions'] ?? [] as $ad) {
+        $ptName = (string) ($ad[0] ?? '');
+        $bedId  = strtolower((string) ($ad[1] ?? ''));
+        if (function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest($userId, $ptName)) {
+            if (str_contains($bedId, $target) || $bedId === $target) {
+                return true;
+            }
+        }
+    }
+    foreach ($state['bills'] ?? [] as $i => $b) {
+        $nb = normalize_bill_row($b, $i);
+        if (function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest($userId, $nb['patient'])) {
+            foreach ($nb['items'] as $item) {
+                $desc = strtolower((string) ($item[0] ?? ''));
+                if (str_contains($desc, 'room') || str_contains($desc, 'bed') || str_contains($desc, $target)) {
+                    if (str_contains($desc, $target)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Check if at least one other active, unblocked administrator exists in the system (Last-Admin Rule).
+ */
+function db_has_other_active_admin(string $currentUserId): bool
+{
+    $pdo = db();
+    try {
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM accounts WHERE role = "Admin" AND status = "Active" AND UPPER(user_id) <> UPPER(:uid)');
+        $stmt->execute([':uid' => trim($currentUserId)]);
+        return ((int) $stmt->fetchColumn()) > 0;
+    } catch (Throwable) {
+        return false;
+    }
+}
+
+/**
+ * Get the standardized conflict-of-interest message for blocked Admin actions.
+ * Enforces Last-Admin rule: if only 1 active admin exists, states a second admin is required first.
+ */
+function admin_conflict_blocked_message(string $currentUserId): string
+{
+    if (!db_has_other_active_admin($currentUserId)) {
+        return 'A second administrator is required first. The system must always keep at least one active admin who is not blocked for this action.';
+    }
+    return 'Conflict of Interest: Another admin must do this.';
+}
+
+/**
+ * Return cached array of countries, provinces, cities, and NCR districts from ph_address.js dataset.
+ */
+function db_get_address_dataset(): array
+{
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+    $jsPath = __DIR__ . '/../assets/js/ph_address.js';
+    $js = is_file($jsPath) ? (string) file_get_contents($jsPath) : '';
+    preg_match('/var COUNTRIES = (\[.*?\]);/s', $js, $cm);
+    preg_match('/var PH_PROVINCES = (\[.*?\]);/s', $js, $pm);
+    preg_match('/var PROVINCE_CITIES = (\{.*?\});/s', $js, $pcm);
+    preg_match('/var NCR_DATA = (\{.*?\});/s', $js, $nm);
+
+    $cache = [
+        'countries'       => json_decode($cm[1] ?? '[]', true) ?: [],
+        'provinces'       => json_decode($pm[1] ?? '[]', true) ?: [],
+        'province_cities' => json_decode($pcm[1] ?? '{}', true) ?: [],
+        'ncr_data'        => json_decode($nm[1] ?? '{}', true) ?: [],
+    ];
+    return $cache;
+}
+
+/**
+ * Validate on the server that the selected hierarchical address values belong together.
+ * Returns null if valid, or an error message string if invalid.
+ */
+function db_validate_ph_address(string $country, string $province, string $city, string $barangay, string $street): ?string
+{
+    $country  = trim($country);
+    $province = trim($province);
+    $city     = trim($city);
+    $barangay = trim($barangay);
+    $street   = trim($street);
+
+    if ($country === '') {
+        return 'Country is required.';
+    }
+    if ($street === '') {
+        return 'Street / Building / Unit is required (put N/A if not applicable).';
+    }
+
+    $ds = db_get_address_dataset();
+    if (strcasecmp($country, 'Philippines') !== 0) {
+        if ($city === '') {
+            return 'City / Municipality is required.';
+        }
+        return null;
+    }
+
+    // Philippines validation
+    $matchedProvince = null;
+    foreach ($ds['provinces'] as $p) {
+        if (strcasecmp($p, $province) === 0 || (strcasecmp($province, 'Metro Manila') === 0 && str_contains($p, 'Metro Manila'))) {
+            $matchedProvince = $p;
+            break;
+        }
+    }
+    if (!$matchedProvince) {
+        return 'Invalid Philippine province or region selected.';
+    }
+
+    $validCities = [];
+    if ($matchedProvince === 'Metro Manila (NCR)') {
+        $validCities = array_keys($ds['ncr_data']);
+    } elseif (isset($ds['province_cities'][$matchedProvince])) {
+        $validCities = array_keys($ds['province_cities'][$matchedProvince]);
+    }
+
+    $matchedCity = null;
+    foreach ($validCities as $c) {
+        if (strcasecmp($c, $city) === 0) {
+            $matchedCity = $c;
+            break;
+        }
+    }
+    if (!$matchedCity) {
+        return "City/Municipality '{$city}' does not belong to {$matchedProvince}.";
+    }
+
+    if ($barangay === '') {
+        return 'Barangay / District is required.';
+    }
+
+    return null;
+}
+
+/**
+ * Record an address change to address_history.
+ * Columns: id, owner_type (employee/patient), owner_id, old address fields, new address fields,
+ *          changed_by_user_id, active_role, reason (nullable), changed_at.
+ */
+function db_record_address_history(
+    string $ownerType,
+    string $ownerId,
+    array $oldAddr,
+    array $newAddr,
+    string $changedByUserId,
+    string $activeRole,
+    ?string $reason = null
+): bool {
+    $pdo = db();
+    try {
+        $stmt = $pdo->prepare('INSERT INTO address_history (
+            owner_type, owner_id,
+            old_country, old_province, old_city, old_barangay, old_street, old_postal_code, old_address,
+            new_country, new_province, new_city, new_barangay, new_street, new_postal_code, new_address,
+            changed_by_user_id, active_role, reason, changed_at
+        ) VALUES (
+            :ot, :oi,
+            :oc, :op, :oci, :ob, :os, :opc, :oa,
+            :nc, :np, :nci, :nb, :ns, :npc, :na,
+            :cb, :ar, :rs, :ca
+        )');
+        return $stmt->execute([
+            ':ot'  => $ownerType,
+            ':oi'  => $ownerId,
+            ':oc'  => (string) ($oldAddr['country'] ?? ''),
+            ':op'  => (string) ($oldAddr['province'] ?? ''),
+            ':oci' => (string) ($oldAddr['city'] ?? ''),
+            ':ob'  => (string) ($oldAddr['barangay'] ?? ''),
+            ':os'  => (string) ($oldAddr['street'] ?? ''),
+            ':opc' => (string) ($oldAddr['postal_code'] ?? ''),
+            ':oa'  => (string) ($oldAddr['address'] ?? ''),
+            ':nc'  => (string) ($newAddr['country'] ?? ''),
+            ':np'  => (string) ($newAddr['province'] ?? ''),
+            ':nci' => (string) ($newAddr['city'] ?? ''),
+            ':nb'  => (string) ($newAddr['barangay'] ?? ''),
+            ':ns'  => (string) ($newAddr['street'] ?? ''),
+            ':npc' => (string) ($newAddr['postal_code'] ?? ''),
+            ':na'  => (string) ($newAddr['address'] ?? ''),
+            ':cb'  => $changedByUserId,
+            ':ar'  => $activeRole,
+            ':rs'  => ($reason !== null && trim($reason) !== '') ? trim($reason) : null,
+            ':ca'  => date('M d, Y · H:i'),
+        ]);
+    } catch (Throwable) {
+        return false;
+    }
 }

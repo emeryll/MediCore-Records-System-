@@ -146,6 +146,25 @@ function current_user_name(string $role): string
     if (!empty($_SESSION['user_name']) && ($_SESSION['role'] ?? '') === $role) {
         return (string) $_SESSION['user_name'];
     }
+    if (!empty($_SESSION['user_name'])) {
+        return (string) $_SESSION['user_name'];
+    }
+    if ($role === 'Admin') {
+        foreach ($_SESSION['state']['users'] ?? [] as $u) {
+            if (($u[2] ?? '') === 'Admin' && !empty($u[0])) {
+                return (string) $u[0];
+            }
+        }
+        if (function_exists('db')) {
+            try {
+                $r = db()->query("SELECT full_name FROM accounts WHERE role = 'Admin' OR user_id = 'A-0001' ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+                if ($r && !empty($r['full_name'])) {
+                    return (string) $r['full_name'];
+                }
+            } catch (Throwable) {}
+        }
+        return 'Medea Solon';
+    }
     if ($role === 'Patient' && !empty($_SESSION['state']['patients'][0][0])) {
         return (string) $_SESSION['state']['patients'][0][0];
     }
@@ -156,12 +175,26 @@ function current_user_name(string $role): string
             }
         }
     }
-    return ['Admin' => 'System Administrator', 'Staff' => 'Front Desk Staff', 'Cashier' => 'Hospital Cashier', 'Doctor' => 'Attending Physician', 'Patient' => 'Patient'][$role] ?? 'User';
+    if ($role === 'Staff') {
+        foreach ($_SESSION['state']['users'] ?? [] as $u) {
+            if (($u[2] ?? '') === 'Staff' && ($u[3] ?? '') === 'Active') {
+                return (string) $u[0];
+            }
+        }
+    }
+    if ($role === 'Cashier') {
+        foreach ($_SESSION['state']['users'] ?? [] as $u) {
+            if (($u[2] ?? '') === 'Cashier' && ($u[3] ?? '') === 'Active') {
+                return (string) $u[0];
+            }
+        }
+    }
+    return ['Admin' => 'Medea Solon', 'Staff' => 'Front Desk Staff', 'Cashier' => 'Hospital Cashier', 'Doctor' => 'Attending Physician', 'Patient' => 'Patient'][$role] ?? 'User';
 }
 
 function current_user_title(string $role): string
 {
-    $base = ['Admin' => 'WMMC System Admin', 'Staff' => 'Front desk & records', 'Cashier' => 'Billing & cashier desk', 'Doctor' => 'Attending physician', 'Patient' => 'Patient portal'][$role] ?? '';
+    $base = ['Admin' => 'WMMC Hospital Admin', 'Staff' => 'Front desk & records', 'Cashier' => 'Billing & cashier desk', 'Doctor' => 'Attending physician', 'Patient' => 'Patient portal'][$role] ?? '';
     $uid  = $_SESSION['user_id'] ?? '';
     return $uid !== '' ? $base . ' · ' . $uid : $base;
 }

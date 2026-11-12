@@ -11,6 +11,28 @@ if (empty($_SESSION['csrf'])) {
     $_SESSION['csrf'] = bin2hex(random_bytes(16));
 }
 
+// Session idle timeout: Admin sessions expire after a shorter idle time (15 mins) than other roles (60 mins)
+if (!empty($_SESSION['role']) && !empty($_SESSION['user_id'])) {
+    $curRole = (string) $_SESSION['role'];
+    $maxIdle = ($curRole === 'Admin') ? 900 : 3600;
+    if (!empty($_SESSION['last_activity']) && (time() - (int) $_SESSION['last_activity']) > $maxIdle) {
+        $wasAdmin = ($curRole === 'Admin');
+        $savedCsrf = $_SESSION['csrf'] ?? null;
+        session_unset();
+        if ($savedCsrf) {
+            $_SESSION['csrf'] = $savedCsrf;
+        }
+        $_SESSION['login_error'] = $wasAdmin
+            ? 'Admin session expired due to inactivity (15-minute idle limit). Please sign in again.'
+            : 'Session expired due to inactivity. Please sign in again.';
+        if (!headers_sent()) {
+            header('Location: index.php?auth=login');
+            exit;
+        }
+    }
+    $_SESSION['last_activity'] = time();
+}
+
 const APP_NAME          = 'West Metro Medical Center';
 const APP_SHORT_NAME    = 'WMMC';
 const APP_FACILITY      = 'West Metro Medical Center';
@@ -187,6 +209,19 @@ function mask_patient_name(string $fullName): string
     return implode(' ', $masked);
 }
 
+/**
+ * Mask patient phone number (e.g. "09221234522" -> "0922*****22").
+ */
+function mask_patient_phone(string $phone): string
+{
+    $clean = preg_replace('/[^0-9]/', '', $phone);
+    if (strlen($clean) >= 6) {
+        $prefixLen = min(4, strlen($clean) - 2);
+        return substr($clean, 0, $prefixLen) . '*****' . substr($clean, -2);
+    }
+    return $phone;
+}
+
 /** Calculate exact age in years from a birthdate string, or null if not set. */
 function patient_age(?string $bdate): ?int
 {
@@ -238,6 +273,25 @@ function is_provisional_patient(?array $pt): bool
     return false;
 }
 
+/**
+ * Format any MRN or patient identifier to consistent fixed-width format (e.g. MRN-000001, MRN-001001).
+ */
+function format_mrn(mixed $raw): string
+{
+    if ($raw === null || $raw === '') {
+        return '';
+    }
+    $rawStr = trim((string) $raw);
+    if ($rawStr === '' || $rawStr === '—' || str_starts_with(strtoupper($rawStr), 'PROV-')) {
+        return $rawStr;
+    }
+    $digits = preg_replace('/[^0-9]/', '', $rawStr);
+    if ($digits === '') {
+        return $rawStr;
+    }
+    return 'MRN-' . str_pad($digits, 6, '0', STR_PAD_LEFT);
+}
+
 /** Return the display MRN for a patient, or blank ('') / fallback ('—') if Provisional. */
 function patient_mrn_display(?array $pt, string $provisionalFallback = ''): string
 {
@@ -248,16 +302,7 @@ function patient_mrn_display(?array $pt, string $provisionalFallback = ''): stri
     if ($raw === '' || $raw === '—' || str_starts_with(strtoupper($raw), 'PROV-')) {
         return $provisionalFallback;
     }
-    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $raw, $m)) {
-        return 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
-    }
-    if (str_starts_with(strtoupper($raw), 'MRN-')) {
-        return $raw;
-    }
-    if (is_numeric($raw)) {
-        return 'MRN-' . str_pad($raw, 4, '0', STR_PAD_LEFT);
-    }
-    return $raw;
+    return format_mrn($raw);
 }
 
 /** Is a provisional record stale (created more than $daysThreshold days ago and still not converted)? */
@@ -683,24 +728,37 @@ function normalize_bill_row(array $b, int $idx = 0): array
     $items = (!empty($b[6]) && is_array($b[6])) ? $b[6] : ((!empty($b['items']) && is_array($b['items'])) ? $b['items'] : default_bill_items($total));
     $mrn   = (string) ($b['mrn'] ?? ($b[7] ?? ''));
 
+    $patientAddress = (string) ($b['patient_address'] ?? ($b[8] ?? ''));
+    if ($patientAddress === '') {
+        $st = $GLOBALS['state'] ?? null;
+        if (is_array($st) && function_exists('find_patient_record')) {
+            $ptRec = find_patient_record($st, $patient);
+            if ($ptRec) {
+                $patientAddress = (string) ($ptRec[7] ?? ($ptRec['address'] ?? ''));
+            }
+        }
+    }
+
     return [
-        0          => $patient,
-        1          => format_money($total),
-        2          => $status,
-        3          => $issued,
-        4          => $billNo,
-        5          => $paid,
-        6          => $items,
-        7          => $mrn,
-        'patient'  => $patient,
-        'mrn'      => $mrn,
-        'total'    => $total,
-        'paid'     => $paid,
-        'balance'  => $balance,
-        'status'   => $status,
-        'issued'   => $issued,
-        'bill_no'  => $billNo,
-        'items'    => $items,
+        0                 => $patient,
+        1                 => format_money($total),
+        2                 => $status,
+        3                 => $issued,
+        4                 => $billNo,
+        5                 => $paid,
+        6                 => $items,
+        7                 => $mrn,
+        8                 => $patientAddress,
+        'patient'         => $patient,
+        'mrn'             => $mrn,
+        'total'           => $total,
+        'paid'            => $paid,
+        'balance'         => $balance,
+        'status'          => $status,
+        'issued'          => $issued,
+        'bill_no'         => $billNo,
+        'items'           => $items,
+        'patient_address' => $patientAddress,
     ];
 }
 

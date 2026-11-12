@@ -49,7 +49,9 @@ $actions = '<div class="button-pair">'
         <div>
             <span>Billed to</span>
             <strong><?= e($ptName) ?></strong>
-            <p>MRN <?= e($billMrn ?: '—') ?> · Birthday: <?= e($billPtDob) ?> (<?= e($billPtAge) ?>)<br>PhilHealth / HMO: <?= e($billPtHin) ?></p>
+            <p>MRN <?= e($billMrn ?: '—') ?> · Birthday: <?= e($billPtDob) ?> (<?= e($billPtAge) ?>)<br>
+            PhilHealth / HMO: <?= e($billPtHin) ?><br>
+            Address: <?= e(!empty($nb['patient_address']) ? $nb['patient_address'] : ($billPtRec[7] ?? ($billPtRec['address'] ?? '—'))) ?></p>
         </div>
         <div>
             <span>Facility</span>

@@ -177,8 +177,15 @@ foreach ($paged['rows'] as $p):
                 <?php endif; ?>
             <?php endif; ?>
         </td>
-        <td style="max-width:210px; font-size:12.5px; color:var(--gray-600);">
-            <?= e($isProv ? 'Pending check-in verification' : (string) ($p[7] ?: '—')) ?>
+        <td style="max-width:230px; font-size:12.5px; color:var(--gray-600);">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:6px;">
+                <span><?= e($isProv ? 'Pending check-in verification' : (string) ($p[7] ?: '—')) ?></span>
+                <?php if (!$isProv && in_array($role, ['Staff', 'Admin'], true)): ?>
+                    <a href="<?= e(url(['page' => 'patients', 'modal' => ($role === 'Admin' ? 'Correct patient address' : 'Edit patient address'), 'patient' => $p[0]])) ?>" title="Edit residential address" style="color:var(--teal-700); display:inline-flex; align-items:center; flex-shrink:0; padding:2px;">
+                        <?= icon('edit', 14) ?>
+                    </a>
+                <?php endif; ?>
+            </div>
         </td>
         <td>
             <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">

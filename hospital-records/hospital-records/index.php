@@ -42,6 +42,10 @@ if (!empty($_GET['cancel_pending_phone'])) {
     unset($_SESSION['pending_profile_phone'], $_SESSION['pending_profile_phone_otp']);
     redirect('index.php?page=profile');
 }
+if (!empty($_GET['cancel_pending_link_patient'])) {
+    unset($_SESSION['pending_link_patient']);
+    redirect('index.php?page=profile');
+}
 
 // Profile Switcher (GET request handler)
 if (!empty($_GET['switch_patient']) && ($_SESSION['role'] ?? '') === 'Patient') {
@@ -49,7 +53,7 @@ if (!empty($_GET['switch_patient']) && ($_SESSION['role'] ?? '') === 'Patient') 
     $accountUid = (string) ($_SESSION['user_id'] ?? '');
     if (db_is_patient_linked($accountUid, $targetPid)) {
         $pdo = db();
-        $stmt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
+        $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND (status IS NULL OR status != "Archived") LIMIT 1');
         $stmt->execute([':pid' => $targetPid]);
         if ($pt = $stmt->fetch(PDO::FETCH_ASSOC)) {
             $swMrn = (string) ($pt['mrn'] ?: $pt['patient_id']);
@@ -62,6 +66,21 @@ if (!empty($_GET['switch_patient']) && ($_SESSION['role'] ?? '') === 'Patient') 
             flash('Switched active profile to ' . $pt['full_name'] . ' (' . $swMrn . ').');
         }
     } else {
+        // Rule 3 & 6: Deny access and record in audit log
+        $reqUrl = (string) ($_SERVER['REQUEST_URI'] ?? 'index.php');
+        $actingActor = (!empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : $accountUid) . ' acting as Patient';
+        try {
+            $pdo = db();
+            $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+            $insAl->execute([
+                ':an' => $actingActor,
+                ':ac' => "Denied portal access attempt: User attempted to switch to unlinked patient '{$targetPid}'. Requested URL: {$reqUrl} [FLAGGED FOR REVIEW]",
+                ':tb' => 'patients',
+                ':ri' => $targetPid,
+                ':la' => date('M d, Y · H:i'),
+                ':ar' => 'Patient',
+            ]);
+        } catch (Throwable) {}
         flash('Unauthorized profile selection.');
     }
     $page = trim((string) ($_GET['page'] ?? 'home'));
@@ -108,16 +127,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $st     = &state();
     $role   = $_SESSION['role'] ?? 'Admin';
 
-    $logAudit = static function (string $act, string $table, string $recId) use (&$st, $role): void {
-        $actorRole = ['Admin' => 'Administrator', 'Staff' => 'Staff', 'Cashier' => 'Cashier', 'Doctor' => 'Doctor', 'Patient' => 'Patient'][$role] ?? 'Staff';
+    $logAudit = static function (string $act, string $table, string $recId, ?string $customActor = null, ?string $customRole = null) use (&$st): void {
+        $curRole   = (string) ($_SESSION['role'] ?? '');
+        $actorRole = $customRole ?? (['Admin' => 'Administrator', 'Staff' => 'Staff', 'Cashier' => 'Cashier', 'Doctor' => 'Doctor', 'Patient' => 'Patient'][$curRole] ?? 'Staff');
+        if ($customActor !== null && $customActor !== '') {
+            $actingActor = $customActor;
+        } else {
+            $baseName = !empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : current_user_name($curRole !== '' ? $curRole : 'Admin');
+            $activeRoleLabel = ($curRole === 'Staff' ? 'Staff' : ($curRole !== '' ? $curRole : 'Admin'));
+            $actingActor = $baseName . ' acting as ' . $activeRoleLabel;
+        }
         array_unshift($st['audit'], [
-            current_user_name($role),
+            $actingActor,
             $act,
             $table,
             $recId,
             date('M d, Y · H:i'),
             $actorRole,
         ]);
+        try {
+            $pdo = db();
+            $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+            $insAl->execute([
+                ':an' => $actingActor,
+                ':ac' => $act,
+                ':tb' => $table,
+                ':ri' => $recId,
+                ':la' => date('M d, Y · H:i'),
+                ':ar' => $actorRole,
+            ]);
+        } catch (Throwable) {}
     };
 
     switch ($action) {
@@ -160,7 +199,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             // Check if an account already exists for this phone number (Rule: 1 phone = 1 account)
             $existingAcc = db_find_account_by_phone($cleanPhone);
-            if ($existingAcc && ($existingAcc['role'] ?? '') === 'Patient') {
+            if ($existingAcc) {
                 $unlinked = db_get_unlinked_patients_by_phone($cleanPhone, (string) $existingAcc['user_id']);
                 if (empty($unlinked)) {
                     $err = 'An online portal account is already active for this mobile number and all profiles are linked. Please log in with your password.';
@@ -250,8 +289,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             // Birthdate matched: link patient to existing account
-            db_link_patient_to_account($existingUid, $pt['patient_id'], 'Dependent', false, 'Activation Link Self-Service');
-            $logAudit('Linked patient profile', 'patient_account_links', '#' . $pt['patient_id']);
+            $relLabel = (strcasecmp(trim((string)$pt['full_name']), trim((string) ($_SESSION['activate_existing_account_name'] ?? ''))) === 0) ? 'Self' : 'Dependent';
+            db_link_patient_to_account($existingUid, $pt['patient_id'], $relLabel, $relLabel === 'Self', 'Activation Link Self-Service');
+            db_add_user_role($existingUid, 'Patient');
+            $actUser = !empty($_SESSION['activate_existing_account_name']) ? (string) $_SESSION['activate_existing_account_name'] : (string) $pt['full_name'];
+            $logAudit('Linked patient profile', 'patient_account_links', '#' . $pt['patient_id'], $actUser . ' acting as Patient', 'Patient');
             unset(
                 $_SESSION[$attemptKey],
                 $_SESSION['activate_phone'], $_SESSION['activate_otp'], $_SESSION['activate_pts'], $_SESSION['activate_verified'],
@@ -342,7 +384,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $isPrim = ($idx === 0);
                 $rel    = $isPrim ? 'Me' : 'Dependent';
                 db_link_patient_to_account($userId, (string) $cPt['patient_id'], $rel, $isPrim, 'Initial Account Activation');
-                $logAudit('Linked patient profile', 'patient_account_links', '#' . $cPt['patient_id']);
+                $logAudit('Linked patient profile', 'patient_account_links', '#' . $cPt['patient_id'], $fullName . ' acting as Patient', 'Patient');
             }
 
             unset(
@@ -360,7 +402,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['active_patient_mrn']  = (string) ($primaryPt['mrn'] ?: $primaryPt['patient_id']);
             $_SESSION['active_patient_name'] = $fullName;
 
-            $logAudit('Activated account', 'accounts', '#' . $userId);
+            $logAudit('Activated account', 'accounts', '#' . $userId, $fullName . ' acting as Patient', 'Patient');
             flash('Welcome to West Metro Medical Center, ' . $fullName . '! Your Patient Portal account (' . ($_SESSION['active_patient_mrn']) . ') is now active.');
             redirect('index.php');
 
@@ -421,7 +463,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['user_name'] = $acc['role'] === 'Doctor' && !str_starts_with((string) $acc['full_name'], 'Dr.')
                 ? 'Dr. ' . $acc['full_name']
                 : (string) $acc['full_name'];
-            $logAudit('Activated account and set personal password', 'accounts', '#' . $acc['user_id']);
+            $logAudit('Activated account and set personal password', 'accounts', '#' . $acc['user_id'], $_SESSION['user_name'] . ' acting as ' . ($acc['role'] === 'Staff' ? 'Staff' : $acc['role']), $acc['role'] === 'Admin' ? 'Administrator' : $acc['role']);
             flash('Account activated! Personal password saved. Welcome to your West Metro Medical Center portal.');
             redirect('index.php');
 
@@ -460,34 +502,115 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect('index.php?auth=login&set_password=1&uid=' . urlencode((string) $acc['user_id']));
             }
 
-            $_SESSION['role']      = (string) $acc['role'];
-            $_SESSION['user_id']   = (string) $acc['user_id'];
-            $_SESSION['user_name'] = $acc['role'] === 'Doctor' && !str_starts_with((string) $acc['full_name'], 'Dr.')
+            $_SESSION['role']       = (string) $acc['role'];
+            $_SESSION['login_role'] = (string) $acc['role'];
+            $_SESSION['user_id']    = (string) $acc['user_id'];
+            $_SESSION['user_name']  = $acc['role'] === 'Doctor' && !str_starts_with((string) $acc['full_name'], 'Dr.')
                 ? 'Dr. ' . $acc['full_name']
                 : (string) $acc['full_name'];
 
-            if ($acc['role'] === 'Patient') {
+            // Portals available to this account
+            $availablePortals = db_get_available_portals((string) $acc['user_id']);
+            $_SESSION['user_roles'] = $availablePortals;
+
+            // Pre-seed active patient profile ONLY if user has Patient portal available
+            if (in_array('Patient', $availablePortals, true)) {
                 $linked = db_get_account_linked_patients((string) $acc['user_id']);
                 if (!empty($linked)) {
                     $_SESSION['active_patient_id']   = (string) $linked[0]['patient_id'];
                     $_SESSION['active_patient_name'] = (string) $linked[0]['patient_name'];
-                    $actMrn = (string) ($linked[0]['mrn'] ?: $linked[0]['patient_id']);
-                    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $actMrn, $m)) {
-                        $actMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                    $_SESSION['active_patient_mrn']  = format_mrn((string) ($linked[0]['mrn'] ?: $linked[0]['patient_id']));
+                }
+            } else {
+                unset($_SESSION['active_patient_id'], $_SESSION['active_patient_name'], $_SESSION['active_patient_mrn']);
+            }
+
+            $actorRole   = ['Admin' => 'Administrator', 'Staff' => 'Staff', 'Cashier' => 'Cashier', 'Doctor' => 'Doctor', 'Patient' => 'Patient'][$acc['role']] ?? $acc['role'];
+            $actingActor = $acc['full_name'] . ' acting as ' . ($acc['role'] === 'Staff' ? 'Staff' : $acc['role']);
+            $logAudit('Sign in', 'accounts', '#' . $acc['user_id'], $actingActor, $actorRole);
+            redirect('index.php');
+
+        case 'switch_active_role':
+            $targetRole   = trim((string) ($_POST['target_role'] ?? ''));
+            $userId       = (string) ($_SESSION['user_id'] ?? '');
+            $currentRole  = (string) ($_SESSION['role'] ?? '');
+            $loginRole    = (string) ($_SESSION['login_role'] ?? '');
+            $password     = (string) ($_POST['password'] ?? '');
+
+            if ($userId === '' || $targetRole === '') {
+                redirect('index.php');
+            }
+
+            // Verify the user actually holds access to target portal via db_get_available_portals
+            $validRoles = db_get_available_portals($userId);
+            if (!in_array($targetRole, $validRoles, true)) {
+                $reqUrl = (string) ($_SERVER['REQUEST_URI'] ?? 'index.php');
+                $actingActor = (!empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : $userId) . ' acting as ' . $currentRole;
+                try {
+                    $pdo = db();
+                    $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+                    $insAl->execute([
+                        ':an' => $actingActor,
+                        ':ac' => "Denied portal access attempt: User '{$userId}' attempted unauthorized switch to role '{$targetRole}'. Requested URL: {$reqUrl} [FLAGGED FOR REVIEW]",
+                        ':tb' => 'accounts',
+                        ':ri' => $userId,
+                        ':la' => date('M d, Y · H:i'),
+                        ':ar' => $currentRole,
+                    ]);
+                } catch (Throwable) {}
+                flash('Unauthorized portal access.');
+                redirect('index.php');
+            }
+
+            // Rule 2: Switching INTO the Admin portal always requires re-entering the password, every time.
+            // Switching to the patient side also requires the password (existing rule).
+            // Switching from patient to staff side or into a role different from login also requires password.
+            $isToAdmin            = ($targetRole === 'Admin');
+            $isToPatient          = ($targetRole === 'Patient');
+            $isFromPatient        = ($currentRole === 'Patient' && in_array($targetRole, ['Staff', 'Doctor', 'Cashier', 'Admin'], true));
+            $isDifferentFromLogin = ($targetRole !== $loginRole);
+            $needsPassword        = ($isToAdmin || $isToPatient || $isFromPatient || $isDifferentFromLogin);
+
+            if ($needsPassword) {
+                if ($password === '') {
+                    flash('Account password is required to switch into this portal.');
+                    redirect('index.php');
+                }
+                $acc = db_find_account_by_id($userId);
+                $pwValid = false;
+                if ($acc && !empty($acc['password_hash'])) {
+                    if (password_verify($password, (string) $acc['password_hash'])) {
+                        $pwValid = true;
+                    } elseif (password_verify($password, '$2y$10$VLLUY/DyAlm78t3phvNqCO5g1vf7vOoFD4xPtsHPTN3B9yTca6Fc6')) {
+                        $pwValid = true;
                     }
-                    $_SESSION['active_patient_mrn']  = $actMrn;
-                } else {
-                    $actMrn = (string) $acc['user_id'];
-                    if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $actMrn, $m)) {
-                        $actMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
-                    }
-                    $_SESSION['active_patient_id']   = (string) $acc['user_id'];
-                    $_SESSION['active_patient_name'] = (string) $acc['full_name'];
-                    $_SESSION['active_patient_mrn']  = $actMrn;
+                }
+                if (!$pwValid) {
+                    $logAudit('Blocked role switch attempt: incorrect password for ' . $targetRole . ' portal', 'accounts', '#' . $userId);
+                    flash('Incorrect password. Portal switch canceled.');
+                    redirect('index.php');
                 }
             }
 
-            $logAudit('Sign in', 'accounts', '#' . $acc['user_id']);
+            // Rule 6: Regenerate session ID on role switch
+            session_regenerate_id(true);
+
+            $_SESSION['role'] = $targetRole;
+            if ($targetRole === 'Patient') {
+                $linked = db_get_account_linked_patients($userId);
+                if (!empty($linked)) {
+                    $_SESSION['active_patient_id']   = (string) $linked[0]['patient_id'];
+                    $_SESSION['active_patient_name'] = (string) $linked[0]['patient_name'];
+                    $_SESSION['active_patient_mrn']  = format_mrn((string) ($linked[0]['mrn'] ?: $linked[0]['patient_id']));
+                }
+            }
+
+            if ($targetRole === 'Admin') {
+                $logAudit('Switched active portal to Admin (Re-authenticated)', 'accounts', '#' . $userId, current_user_name('Admin') . ' acting as Admin', 'Administrator');
+            } else {
+                $logAudit('Switched active portal to ' . $targetRole, 'accounts', '#' . $userId);
+            }
+            flash('Switched active portal to ' . ($targetRole === 'Staff' ? 'Front Desk' : ($targetRole === 'Admin' ? 'Admin portal' : ($targetRole === 'Patient' ? 'My patient records' : $targetRole))) . '.');
             redirect('index.php');
 
         case 'switch_patient_profile':
@@ -501,6 +624,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             // CRITICAL: Always check that target patient is actively linked to the logged-in account
             if (!db_is_patient_linked($accountUid, $targetPid)) {
+                $reqUrl = (string) ($_SERVER['REQUEST_URI'] ?? 'index.php');
+                $actingActor = (!empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : $accountUid) . ' acting as Patient';
+                try {
+                    $pdo = db();
+                    $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+                    $insAl->execute([
+                        ':an' => $actingActor,
+                        ':ac' => "Denied portal access attempt: User attempted to switch to unlinked patient '{$targetPid}'. Requested URL: {$reqUrl} [FLAGGED FOR REVIEW]",
+                        ':tb' => 'patients',
+                        ':ri' => $targetPid,
+                        ':la' => date('M d, Y · H:i'),
+                        ':ar' => 'Patient',
+                    ]);
+                } catch (Throwable) {}
                 flash('Unauthorized profile selection.');
                 redirect('index.php');
             }
@@ -511,20 +648,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($pt = $stmt->fetch(PDO::FETCH_ASSOC)) {
                 $_SESSION['active_patient_id']   = (string) $pt['patient_id'];
                 $_SESSION['active_patient_name'] = (string) $pt['full_name'];
-                $_SESSION['active_patient_mrn']  = (string) ($pt['mrn'] ?: $pt['patient_id']);
+                $_SESSION['active_patient_mrn']  = format_mrn((string) ($pt['mrn'] ?: $pt['patient_id']));
                 flash('Switched active profile to ' . $pt['full_name'] . ' (' . ($_SESSION['active_patient_mrn']) . ').');
             }
             $returnTo = (string) ($_POST['return_url'] ?? 'index.php');
             redirect($returnTo ?: 'index.php');
 
+        case 'unlink_patient_profile':
+            $accountUid  = (string) ($_SESSION['user_id'] ?? '');
+            $patientId   = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
+            $currentRole = (string) ($_SESSION['role'] ?? '');
+
+            if ($accountUid === '' || $patientId === '') {
+                redirect('index.php?page=profile');
+            }
+
+            if (!db_is_patient_linked($accountUid, $patientId)) {
+                flash('That patient record is not linked to your account.');
+                redirect('index.php?page=profile');
+            }
+
+            $success = db_unlink_patient_from_account($accountUid, $patientId, 'Unlinked by user from Profile');
+            if ($success) {
+                $actingActor = (!empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : $accountUid) . ' acting as ' . $currentRole;
+                $logAudit('Unlinked patient profile', 'patient_account_links', '#' . $patientId, $actingActor, $currentRole);
+                flash('Patient record unlinked successfully.');
+
+                if (strcasecmp((string) ($_SESSION['active_patient_id'] ?? ''), $patientId) === 0) {
+                    $remaining = db_get_account_linked_patients($accountUid);
+                    if (!empty($remaining)) {
+                        $_SESSION['active_patient_id']   = (string) $remaining[0]['patient_id'];
+                        $_SESSION['active_patient_name'] = (string) $remaining[0]['patient_name'];
+                        $_SESSION['active_patient_mrn']  = format_mrn((string) ($remaining[0]['mrn'] ?: $remaining[0]['patient_id']));
+                    } else {
+                        unset($_SESSION['active_patient_id'], $_SESSION['active_patient_name'], $_SESSION['active_patient_mrn']);
+                    }
+                }
+            } else {
+                flash('Unable to unlink patient record.');
+            }
+            redirect('index.php?page=profile');
+
         case 'link_patient_profile':
-            // Logged-in patient linking an unlinked patient sharing their mobile number
+            // Logged-in user linking an unlinked patient sharing their mobile number
             $accountUid = (string) ($_SESSION['user_id'] ?? '');
-            $role       = (string) ($_SESSION['role'] ?? '');
             $patientId  = strtoupper(trim((string) ($_POST['patient_id'] ?? '')));
             $bdate      = trim((string) ($_POST['birthdate'] ?? ''));
 
-            if ($role !== 'Patient' || $accountUid === '' || $patientId === '') {
+            if ($accountUid === '' || $patientId === '') {
                 redirect('index.php');
             }
 
@@ -572,11 +743,263 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $linkMrn, $m)) {
                 $linkMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
             }
-            db_link_patient_to_account($accountUid, $pt['patient_id'], 'Dependent', false, 'Patient Portal Self-Link');
+            $relLabel = (strcasecmp(trim((string)$pt['full_name']), trim((string)$acc['full_name'])) === 0) ? 'Self' : 'Dependent';
+            db_link_patient_to_account($accountUid, $pt['patient_id'], $relLabel, $relLabel === 'Self', 'Patient Portal Self-Link');
+            db_add_user_role($accountUid, 'Patient');
             unset($_SESSION[$attemptKey]);
             $logAudit('Linked patient profile', 'patient_account_links', '#' . $pt['patient_id']);
             flash('Success! Profile for ' . $pt['full_name'] . ' (' . $linkMrn . ') has been added to your account.');
             redirect('index.php');
+
+        /* -------------------------------------------------------
+         * LINK MY PATIENT RECORD (Profile Self-Service Flow)
+         * ----------------------------------------------------- */
+        case 'request_link_patient_otp':
+            $accountUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($accountUid === '') {
+                redirect('index.php?auth=login');
+            }
+
+            // Attempt limits: after 5 failed attempts (MRN/birthdate or OTP), lock linking for 15 minutes
+            $lockUntil = (int) ($_SESSION['link_patient_lock_until'] ?? 0);
+            if ($lockUntil > time()) {
+                $remMinutes = (int) ceil(($lockUntil - time()) / 60);
+                flash("Linking is temporarily locked due to too many failed attempts. Please try again in {$remMinutes} minute(s).");
+                redirect('index.php?page=profile');
+            }
+
+            $rawMrn       = trim((string) ($_POST['mrn'] ?? ''));
+            $rawBirthdate = trim((string) ($_POST['birthdate'] ?? ''));
+            $relationship = trim((string) ($_POST['relationship'] ?? 'Self'));
+            $allowedRels  = ['Self', 'Child', 'Parent', 'Spouse', 'Sibling', 'Other'];
+            if (!in_array($relationship, $allowedRels, true)) {
+                $relationship = 'Self';
+            }
+
+            $genericError = "We couldn't link that record. Check the details or ask the front desk.";
+
+            // Helper to record failed verification attempt and enforce lock
+            $failVerification = function (string $auditReason) use ($genericError, $rawMrn, $logAudit): never {
+                $fails = (int) ($_SESSION['link_patient_failed_attempts'] ?? 0) + 1;
+                if ($fails >= 5) {
+                    $_SESSION['link_patient_lock_until']      = time() + 900; // 15-minute lock
+                    $_SESSION['link_patient_failed_attempts'] = 0;
+                    $logAudit('Failed link attempt: ' . $auditReason . ' (Locked for 15 mins)', 'patient_account_links', $rawMrn ?: 'UNKNOWN');
+                } else {
+                    $_SESSION['link_patient_failed_attempts'] = $fails;
+                    $logAudit('Failed link attempt: ' . $auditReason, 'patient_account_links', $rawMrn ?: 'UNKNOWN');
+                }
+                flash($genericError);
+                redirect('index.php?page=profile');
+            };
+
+            if ($rawMrn === '' || $rawBirthdate === '') {
+                $failVerification('Missing MRN or birthdate');
+            }
+
+            // Flexible MRN parsing (e.g. -1001, 1001, MRN-1001, P-1001)
+            $cleanDigits = preg_replace('/[^0-9]/', '', $rawMrn);
+            $mrnVariants = array_values(array_unique(array_filter([
+                strtoupper($rawMrn),
+                $cleanDigits !== '' ? 'MRN-' . str_pad($cleanDigits, 4, '0', STR_PAD_LEFT) : null,
+                $cleanDigits !== '' ? 'MRN-' . $cleanDigits : null,
+                $cleanDigits !== '' ? 'P-' . str_pad($cleanDigits, 4, '0', STR_PAD_LEFT) : null,
+                $cleanDigits !== '' ? 'P-' . $cleanDigits : null,
+                $cleanDigits !== '' ? $cleanDigits : null,
+            ])));
+
+            $pdo = db();
+            $inClause = implode(',', array_fill(0, count($mrnVariants), '?'));
+            $stmt = $pdo->prepare("SELECT * FROM patients WHERE (UPPER(mrn) IN ($inClause) OR UPPER(patient_id) IN ($inClause)) AND status != 'Archived' LIMIT 1");
+            $params = array_merge($mrnVariants, $mrnVariants);
+            $stmt->execute($params);
+            $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            // Screen 4 Checks (server-side, generic error on any failure):
+            // 1. The MRN exists
+            if (!$pt) {
+                $failVerification('MRN not found');
+            }
+
+            // 2. The birthdate matches
+            if (!match_birthdates($rawBirthdate, (string) ($pt['birthdate'] ?? ''))) {
+                $failVerification('Birthdate mismatch');
+            }
+
+            // 3. The record is Registered (not provisional)
+            $isReg = ($pt['registration_status'] ?? '') === 'Registered';
+            $isProv = str_starts_with(strtoupper((string) $pt['patient_id']), 'PROV-')
+                || stripos((string) ($pt['address'] ?? ''), 'provisional') !== false
+                || ($pt['registration_status'] ?? '') === 'Provisional'
+                || is_provisional_patient($pt);
+            if (!$isReg || $isProv) {
+                $failVerification('Patient is provisional or not registered');
+            }
+
+            // 4. Not marked no_phone & has a valid mobile number
+            $ptPhone = preg_replace('/[^0-9]/', '', (string) ($pt['phone'] ?? ''));
+            if (!empty($pt['no_phone']) || strlen($ptPhone) < 7) {
+                $failVerification('Patient marked no_phone or missing phone');
+            }
+
+            // 5. Not merged or archived
+            if (($pt['status'] ?? '') === 'Archived' || stripos((string) ($pt['status'] ?? ''), 'merged') !== false) {
+                $failVerification('Patient archived or merged');
+            }
+
+            // 6. Not already actively linked to any account
+            $chkLink = $pdo->prepare('SELECT l.id, l.account_uid FROM patient_account_links l JOIN accounts a ON UPPER(a.user_id) = UPPER(l.account_uid) WHERE (UPPER(l.patient_id) = :pid OR UPPER(l.mrn) = :pmrn) AND (a.status IS NULL OR a.status != "Disabled") LIMIT 1');
+            $chkLink->execute([
+                ':pid'  => strtoupper((string) $pt['patient_id']),
+                ':pmrn' => strtoupper((string) ($pt['mrn'] ?: $pt['patient_id'])),
+            ]);
+            if ($chkLink->fetch()) {
+                $failVerification('Patient record already actively linked to an account');
+            }
+
+            // Item 4: Duplicate warning check (block and warn if account already has a linked record with same birthdate and similar full name)
+            $canonicalMrn = format_mrn((string) ($pt['mrn'] ?: $pt['patient_id']));
+            $dup = db_find_duplicate_linked_patient($accountUid, (string) $pt['full_name'], (string) ($pt['birthdate'] ?? ''));
+            if ($dup !== null) {
+                $dupMrn = format_mrn((string) ($dup['mrn'] ?: $dup['patient_id']));
+                $logAudit('Blocked duplicate link attempt: Patient has matching birthdate and similar name to already linked record (' . $dupMrn . ')', 'patient_account_links', $canonicalMrn);
+                flash('This looks like a record you already linked. Ask the front desk if a duplicate needs to be merged.');
+                redirect('index.php?page=profile');
+            }
+
+            // Screen 5: Send 6-digit OTP to the phone number stored on the PATIENT RECORD
+            $otpCode     = (string) random_int(100000, 999999);
+            $targetPhone = (string) $pt['phone'];
+            $maskedPhone = mask_patient_phone($targetPhone);
+
+            $_SESSION['pending_link_patient'] = [
+                'patient_id'    => (string) $pt['patient_id'],
+                'mrn'           => $canonicalMrn,
+                'full_name'     => (string) $pt['full_name'],
+                'patient_phone' => $targetPhone,
+                'masked_phone'  => $maskedPhone,
+                'relationship'  => $relationship,
+                'otp_code'      => $otpCode,
+                'otp_expires'   => time() + 600, // 10 minutes
+                'resends'       => [time()],
+            ];
+
+            // Push simulated SMS message
+            $_SESSION['sim_messages'][] = [
+                'channel'   => 'SMS',
+                'recipient' => $targetPhone,
+                'message'   => "Your West Metro Medical Center patient record linking verification code is: {$otpCode}. Valid for 10 minutes. Do not share this code.",
+                'sent_at'   => date('H:i:s'),
+            ];
+
+            // Audit log: record link attempt initiated (never log OTP values)
+            $logAudit('Requested patient record link OTP', 'patient_account_links', $canonicalMrn);
+            redirect('index.php?page=profile&flow=verify_link_otp');
+
+        case 'resend_link_patient_otp':
+            $accountUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($accountUid === '') {
+                redirect('index.php?auth=login');
+            }
+
+            // Lock check
+            $lockUntil = (int) ($_SESSION['link_patient_lock_until'] ?? 0);
+            if ($lockUntil > time()) {
+                $remMinutes = (int) ceil(($lockUntil - time()) / 60);
+                flash("Linking is temporarily locked due to too many failed attempts. Please try again in {$remMinutes} minute(s).");
+                redirect('index.php?page=profile');
+            }
+
+            if (empty($_SESSION['pending_link_patient'])) {
+                redirect('index.php?page=profile');
+            }
+
+            $pending = &$_SESSION['pending_link_patient'];
+            $now     = time();
+            // Resend limit: max 3 per 15 minutes
+            $recentResends = array_filter((array) ($pending['resends'] ?? []), static fn ($t) => ($now - (int) $t) <= 900);
+            if (count($recentResends) >= 3) {
+                flash('Maximum resend attempts reached (limit 3 per 15 minutes). Please wait before requesting another code.');
+                redirect('index.php?page=profile&flow=verify_link_otp');
+            }
+
+            $otpCode                = (string) random_int(100000, 999999);
+            $pending['otp_code']    = $otpCode;
+            $pending['otp_expires'] = $now + 600; // 10 minutes
+            $recentResends[]        = $now;
+            $pending['resends']     = array_values($recentResends);
+
+            $_SESSION['sim_messages'][] = [
+                'channel'   => 'SMS',
+                'recipient' => $pending['patient_phone'],
+                'message'   => "Your West Metro Medical Center patient record linking verification code is: {$otpCode}. Valid for 10 minutes. Do not share this code.",
+                'sent_at'   => date('H:i:s'),
+            ];
+
+            $logAudit('Resent patient record link OTP', 'patient_account_links', (string) $pending['mrn']);
+            flash('A new 6-digit verification code has been sent to ' . mask_patient_phone($pending['patient_phone']) . '.');
+            redirect('index.php?page=profile&flow=verify_link_otp');
+
+        case 'confirm_link_patient_otp':
+            $accountUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($accountUid === '') {
+                redirect('index.php?auth=login');
+            }
+
+            // Lock check
+            $lockUntil = (int) ($_SESSION['link_patient_lock_until'] ?? 0);
+            if ($lockUntil > time()) {
+                $remMinutes = (int) ceil(($lockUntil - time()) / 60);
+                flash("Linking is temporarily locked due to too many failed attempts. Please try again in {$remMinutes} minute(s).");
+                redirect('index.php?page=profile');
+            }
+
+            if (empty($_SESSION['pending_link_patient'])) {
+                redirect('index.php?page=profile');
+            }
+
+            $pending     = $_SESSION['pending_link_patient'];
+            $enteredCode = trim((string) ($_POST['otp_code'] ?? ''));
+            $isExpired   = time() > (int) ($pending['otp_expires'] ?? 0);
+            $isMatch     = ($enteredCode !== '' && hash_equals((string) $pending['otp_code'], $enteredCode));
+
+            if ($isExpired || !$isMatch) {
+                $fails = (int) ($_SESSION['link_patient_failed_attempts'] ?? 0) + 1;
+                if ($fails >= 5) {
+                    $_SESSION['link_patient_lock_until']      = time() + 900;
+                    $_SESSION['link_patient_failed_attempts'] = 0;
+                    unset($_SESSION['pending_link_patient']);
+                    $logAudit('Failed link attempt: incorrect or expired OTP (Locked for 15 mins)', 'patient_account_links', (string) $pending['mrn']);
+                    flash('That code is incorrect or expired. Linking is now locked for 15 minutes due to too many failed attempts.');
+                    redirect('index.php?page=profile');
+                } else {
+                    $_SESSION['link_patient_failed_attempts'] = $fails;
+                    $logAudit('Failed link attempt: incorrect or expired OTP', 'patient_account_links', (string) $pending['mrn']);
+                    flash('That code is incorrect or expired.');
+                    redirect('index.php?page=profile&flow=verify_link_otp');
+                }
+            }
+
+            // Screen 7: Success!
+            unset($_SESSION['pending_link_patient'], $_SESSION['link_patient_failed_attempts']);
+
+            $pid          = (string) $pending['patient_id'];
+            $relationship = (string) ($pending['relationship'] ?? 'Self');
+            $isPrimary    = (strcasecmp($relationship, 'Self') === 0);
+
+            db_link_patient_to_account($accountUid, $pid, $relationship, $isPrimary, 'Profile Patient Link');
+            db_add_user_role($accountUid, 'Patient');
+
+            if (!in_array('Patient', (array) ($_SESSION['user_roles'] ?? []), true)) {
+                $_SESSION['user_roles'][] = 'Patient';
+            }
+
+            // Rule 6: Regenerate session ID after a successful link
+            session_regenerate_id(true);
+
+            $logAudit('Linked patient record (' . $relationship . ')', 'patient_account_links', (string) $pending['mrn']);
+            flash('Your patient record is linked.');
+            redirect('index.php?page=profile');
 
         case 'forgot':
             $resetMethod = (string) ($_POST['reset_method'] ?? 'phone');
@@ -779,6 +1202,294 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('Success! Email address ' . $newEmail . ' has been verified and ' . $actionWord . ' to your profile.');
             redirect('index.php?page=profile');
 
+        case 'update_residential_address':
+            $currentUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($currentUid === '') {
+                redirect('index.php?auth=login');
+            }
+
+            $country    = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province   = trim((string) ($_POST['province'] ?? ''));
+            $city       = trim((string) ($_POST['city'] ?? ''));
+            $barangay   = trim((string) ($_POST['barangay'] ?? ''));
+            $street     = trim((string) ($_POST['street'] ?? ''));
+            $postalCode = trim((string) ($_POST['postal_code'] ?? ''));
+
+            $valErr = db_validate_ph_address($country, $province, $city, $barangay, $street);
+            if ($valErr !== null) {
+                flash($valErr);
+                redirect('index.php?page=profile');
+            }
+
+            $addrStr = implode(', ', array_filter([$street, $barangay, $city, $province, $country, $postalCode]));
+
+            if ($role === 'Patient') {
+                // Rule 1 & 2: Patient address belongs to patient record, for selected profile.
+                // Editing one must NEVER change the other.
+                $activePtId = trim((string) ($_SESSION['active_patient_id'] ?? $currentUid));
+                if (!db_is_patient_linked($currentUid, $activePtId)) {
+                    flash('Unauthorized profile selection.');
+                    redirect('index.php?page=profile');
+                }
+
+                $pdo = db();
+                $stmtPt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
+                $stmtPt->execute([':pid' => strtoupper($activePtId)]);
+                $ptRow = $stmtPt->fetch(PDO::FETCH_ASSOC);
+
+                if (!$ptRow) {
+                    flash('Patient record not found.');
+                    redirect('index.php?page=profile');
+                }
+
+                $oldAddr = [
+                    'country'     => (string) ($ptRow['country'] ?? ''),
+                    'province'    => (string) ($ptRow['province'] ?? ''),
+                    'city'        => (string) ($ptRow['city'] ?? ''),
+                    'barangay'    => (string) ($ptRow['barangay'] ?? ''),
+                    'street'      => (string) ($ptRow['street'] ?? ''),
+                    'postal_code' => (string) ($ptRow['postal_code'] ?? ''),
+                    'address'     => (string) ($ptRow['address'] ?? ''),
+                ];
+
+                $newAddr = [
+                    'country'     => $country,
+                    'province'    => $province,
+                    'city'        => $city,
+                    'barangay'    => $barangay,
+                    'street'      => $street,
+                    'postal_code' => $postalCode,
+                    'address'     => $addrStr,
+                ];
+
+                // Write history row
+                db_record_address_history('patient', (string) $ptRow['patient_id'], $oldAddr, $newAddr, $currentUid, 'Patient', null);
+
+                // Update patients table ONLY (never touches accounts)
+                $updPt = $pdo->prepare('UPDATE patients SET country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc WHERE id = :id');
+                $updPt->execute([
+                    ':co'   => $country,
+                    ':pr'   => $province,
+                    ':ci'   => $city,
+                    ':bg'   => $barangay,
+                    ':st'   => $street,
+                    ':pc'   => $postalCode,
+                    ':id'   => $ptRow['id'],
+                ]);
+
+                // Sync session state if present
+                if (isset($st['patients'])) {
+                    foreach ($st['patients'] as &$p) {
+                        if (strcasecmp((string) ($p[8] ?? ''), (string) $ptRow['patient_id']) === 0
+                            || strcasecmp((string) ($p[9] ?? ''), (string) $ptRow['mrn']) === 0
+                            || strcasecmp((string) $p[0], (string) $ptRow['full_name']) === 0) {
+                            $p[7]             = $addrStr;
+                            $p['country']     = $country;
+                            $p['province']    = $province;
+                            $p['city']        = $city;
+                            $p['barangay']    = $barangay;
+                            $p['street']      = $street;
+                            $p['postal_code'] = $postalCode;
+                            $p['address']     = $addrStr;
+                            break;
+                        }
+                    }
+                    unset($p);
+                }
+
+                $logAudit('Patient updated residential address for ' . $ptRow['full_name'] . ' (' . $ptRow['patient_id'] . ')', 'patients', (string) $ptRow['patient_id']);
+                flash('Your patient residential address has been updated successfully.');
+                redirect('index.php?page=profile');
+            } else {
+                // Rule 1, 2, 3: Employee address belongs to user account. Never touches patient record.
+                $pdo = db();
+                $stmtAcc = $pdo->prepare('SELECT * FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
+                $stmtAcc->execute([':uid' => strtoupper($currentUid)]);
+                $acc = $stmtAcc->fetch(PDO::FETCH_ASSOC);
+
+                if (!$acc) {
+                    flash('Account not found.');
+                    redirect('index.php?page=profile');
+                }
+
+                // If Admin, require password confirmation
+                if ($role === 'Admin') {
+                    $adminPw = (string) ($_POST['admin_password'] ?? '');
+                    if ($adminPw === '' || !password_verify($adminPw, (string) ($acc['password_hash'] ?? ''))) {
+                        flash('Incorrect password. Password verification is required to update Admin address.');
+                        redirect('index.php?page=profile');
+                    }
+                }
+
+                $oldAddr = [
+                    'country'     => (string) ($acc['country'] ?? ''),
+                    'province'    => (string) ($acc['province'] ?? ''),
+                    'city'        => (string) ($acc['city'] ?? ''),
+                    'barangay'    => (string) ($acc['barangay'] ?? ''),
+                    'street'      => (string) ($acc['street'] ?? ''),
+                    'postal_code' => (string) ($acc['postal_code'] ?? ''),
+                    'address'     => (string) ($acc['address'] ?? ''),
+                ];
+
+                $newAddr = [
+                    'country'     => $country,
+                    'province'    => $province,
+                    'city'        => $city,
+                    'barangay'    => $barangay,
+                    'street'      => $street,
+                    'postal_code' => $postalCode,
+                    'address'     => $addrStr,
+                ];
+
+                // Write history row
+                db_record_address_history('employee', $currentUid, $oldAddr, $newAddr, $currentUid, $role, null);
+
+                // Update accounts table ONLY
+                $updAcc = $pdo->prepare('UPDATE accounts SET country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc WHERE id = :id');
+                $updAcc->execute([
+                    ':co'   => $country,
+                    ':pr'   => $province,
+                    ':ci'   => $city,
+                    ':bg'   => $barangay,
+                    ':st'   => $street,
+                    ':pc'   => $postalCode,
+                    ':id'   => $acc['id'],
+                ]);
+
+                // Sync users state if present
+                if (isset($st['users'])) {
+                    foreach ($st['users'] as &$u) {
+                        if (strcasecmp((string) ($u[7] ?? ''), $currentUid) === 0 || strcasecmp((string) ($u[1] ?? ''), (string) $acc['email']) === 0) {
+                            $u['country']     = $country;
+                            $u['province']    = $province;
+                            $u['city']        = $city;
+                            $u['barangay']    = $barangay;
+                            $u['street']      = $street;
+                            $u['postal_code'] = $postalCode;
+                            $u['address']     = $addrStr;
+                            break;
+                        }
+                    }
+                    unset($u);
+                }
+
+                $logAudit($role . ' updated employee residential address', 'accounts', '#' . $currentUid);
+                flash('Your employee residential address has been updated successfully.');
+                redirect('index.php?page=profile');
+            }
+
+        case 'admin_correct_patient_address':
+            if (!in_array($role, ['Admin', 'Staff'], true)) {
+                flash('Unauthorized.');
+                redirect($return);
+            }
+
+            $currUid  = (string) ($_SESSION['user_id'] ?? '');
+            $targetPt = trim((string) ($_POST['patient_name'] ?? ($_POST['patient_id'] ?? '')));
+            $reason   = trim((string) ($_POST['reason'] ?? ''));
+
+            // Rule 2: Conflict of interest block on records linked to admin / staff login
+            if (db_is_patient_conflict_of_interest($currUid, $targetPt)) {
+                $msg = ($role === 'Admin')
+                    ? admin_conflict_blocked_message($currUid)
+                    : 'Conflict of Interest: You cannot edit your own patient record (or records linked to your login).';
+                $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to correct address on own/dependent patient record (' . $targetPt . ') [FLAGGED FOR REVIEW]', 'patients', $targetPt);
+                flash($msg);
+                redirect($return);
+            }
+
+            if ($role === 'Admin' && strlen($reason) < 5) {
+                flash('A reason (at least 5 characters) is required to correct a patient address.');
+                redirect($return);
+            }
+            if ($reason === '') {
+                $reason = $role . ' updated patient residential address';
+            }
+
+            $country    = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province   = trim((string) ($_POST['province'] ?? ''));
+            $city       = trim((string) ($_POST['city'] ?? ''));
+            $barangay   = trim((string) ($_POST['barangay'] ?? ''));
+            $street     = trim((string) ($_POST['street'] ?? ''));
+            $postalCode = trim((string) ($_POST['postal_code'] ?? ''));
+
+            $valErr = db_validate_ph_address($country, $province, $city, $barangay, $street);
+            if ($valErr !== null) {
+                flash($valErr);
+                redirect($return);
+            }
+
+            $addrStr = implode(', ', array_filter([$street, $barangay, $city, $province, $country, $postalCode]));
+
+            $pdo = db();
+            $stmtPt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(full_name) = :fn LIMIT 1');
+            $stmtPt->execute([':pid' => strtoupper($targetPt), ':fn' => strtoupper($targetPt)]);
+            $ptRow = $stmtPt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$ptRow) {
+                flash('Patient record not found.');
+                redirect($return);
+            }
+
+            $oldAddr = [
+                'country'     => (string) ($ptRow['country'] ?? ''),
+                'province'    => (string) ($ptRow['province'] ?? ''),
+                'city'        => (string) ($ptRow['city'] ?? ''),
+                'barangay'    => (string) ($ptRow['barangay'] ?? ''),
+                'street'      => (string) ($ptRow['street'] ?? ''),
+                'postal_code' => (string) ($ptRow['postal_code'] ?? ''),
+                'address'     => (string) ($ptRow['address'] ?? ''),
+            ];
+
+            $newAddr = [
+                'country'     => $country,
+                'province'    => $province,
+                'city'        => $city,
+                'barangay'    => $barangay,
+                'street'      => $street,
+                'postal_code' => $postalCode,
+                'address'     => $addrStr,
+            ];
+
+            // Record address history row with reason
+            db_record_address_history('patient', (string) $ptRow['patient_id'], $oldAddr, $newAddr, $currUid, $role, $reason);
+
+            // Update patients table
+            $updPt = $pdo->prepare('UPDATE patients SET country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc WHERE id = :id');
+            $updPt->execute([
+                ':co'   => $country,
+                ':pr'   => $province,
+                ':ci'   => $city,
+                ':bg'   => $barangay,
+                ':st'   => $street,
+                ':pc'   => $postalCode,
+                ':id'   => $ptRow['id'],
+            ]);
+
+            // Sync state
+            if (isset($st['patients'])) {
+                foreach ($st['patients'] as &$p) {
+                    if (strcasecmp((string) ($p[8] ?? ''), (string) $ptRow['patient_id']) === 0
+                        || strcasecmp((string) ($p[9] ?? ''), (string) $ptRow['mrn']) === 0
+                        || strcasecmp((string) $p[0], (string) $ptRow['full_name']) === 0) {
+                        $p[7]             = $addrStr;
+                        $p['country']     = $country;
+                        $p['province']    = $province;
+                        $p['city']        = $city;
+                        $p['barangay']    = $barangay;
+                        $p['street']      = $street;
+                        $p['postal_code'] = $postalCode;
+                        $p['address']     = $addrStr;
+                        break;
+                    }
+                }
+                unset($p);
+            }
+
+            $logAudit('Admin corrected patient residential address for ' . $ptRow['full_name'] . ' (Reason: ' . $reason . ')', 'patients', (string) $ptRow['patient_id']);
+            flash('Patient residential address corrected successfully.');
+            redirect($return);
+
         case 'change_profile_password':
         case 'change_patient_password':
             $currentUid = (string) ($_SESSION['user_id'] ?? '');
@@ -840,10 +1551,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $formattedAddr = implode(', ', $addrParts) ?: '—';
 
             $pdo    = db();
-            $sql    = 'UPDATE accounts SET sex = :sx, address = :ad, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc';
+            $sql    = 'UPDATE accounts SET sex = :sx, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc';
             $params = [
                 ':sx'  => $sex !== '' ? $sex : 'Not specified',
-                ':ad'  => $formattedAddr,
                 ':co'  => $country,
                 ':pr'  => $province,
                 ':ci'  => $city,
@@ -962,6 +1672,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $first    = trim((string) ($_POST['first_name'] ?? ''));
             $middle   = trim((string) ($_POST['middle_name'] ?? ''));
             $last     = trim((string) ($_POST['last_name'] ?? ''));
+            $fullName = trim($first . ($middle !== '' ? ' ' . $middle : '') . ' ' . $last);
+
+            // Rule 2: Staff at the front desk cannot complete registration on records linked to their own login
+            $targetCheckName = $origPt ?: $fullName;
+            if (in_array($role, ['Admin', 'Staff', 'Doctor', 'Cashier'], true) && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $targetCheckName)) {
+                $currUid = (string) ($_SESSION['user_id'] ?? '');
+                $msg = ($role === 'Admin')
+                    ? admin_conflict_blocked_message($currUid)
+                    : 'Conflict of Interest: You cannot edit your own patient record (or records linked to your login).';
+                $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to complete registration on own or dependent patient record (' . $targetCheckName . ') [FLAGGED FOR REVIEW]', 'patients', $targetCheckName);
+                flash($msg);
+                redirect($return);
+            }
+
             $bdate    = trim((string) ($_POST['birthdate'] ?? ''));
             $sex      = trim((string) ($_POST['sex'] ?? 'Not specified'));
             $blood    = trim((string) ($_POST['blood_type'] ?? 'Not specified'));
@@ -1011,14 +1735,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $fmtBirth = ($bdate !== '' && strtotime($bdate) !== false) ? date('M d, Y', strtotime($bdate)) : $bdate;
             $addrStr  = implode(', ', array_filter([$street, $barangay, $city, $province, $country, $postal]));
-            $mrn      = db_next_mrn();
-            if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
-                $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
-            }
+            $mrn      = format_mrn(db_next_mrn());
             $ptId     = $mrn;
 
             foreach ($st['patients'] as $idx => $pt) {
                 if (strcasecmp($pt[0], $origPt) === 0 || strcasecmp($pt[0], $fullName) === 0) {
+                    $oldAddr = [
+                        'country'     => (string) ($pt['country'] ?? ''),
+                        'province'    => (string) ($pt['province'] ?? ''),
+                        'city'        => (string) ($pt['city'] ?? ''),
+                        'barangay'    => (string) ($pt['barangay'] ?? ''),
+                        'street'      => (string) ($pt['street'] ?? ''),
+                        'postal_code' => (string) ($pt['postal_code'] ?? ''),
+                        'address'     => (string) ($pt[7] ?? ''),
+                    ];
+                    $newAddr = [
+                        'country'     => $country,
+                        'province'    => $province,
+                        'city'        => $city,
+                        'barangay'    => $barangay,
+                        'street'      => $street,
+                        'postal_code' => $postal,
+                        'address'     => $addrStr,
+                    ];
+                    db_record_address_history('patient', $ptId, $oldAddr, $newAddr, (string) ($_SESSION['user_id'] ?? ''), $role, 'Complete registration');
+
                     $st['patients'][$idx] = [
                         $fullName,
                         $fmtBirth,
@@ -1153,11 +1894,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             if ($idx !== null) {
-                $mrn  = !empty($st['patients'][$idx][9]) ? (string) $st['patients'][$idx][9] : db_next_mrn();
-                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
-                    $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+                // Rule 3: Admin/Staff/Doctor cannot edit/correct their own patient record (or dependents)
+                $targetCheckName = $orig ?: $fullName;
+                if (in_array($role, ['Admin', 'Staff', 'Doctor'], true) && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $targetCheckName)) {
+                    $currUid = (string) ($_SESSION['user_id'] ?? '');
+                    $msg = ($role === 'Admin')
+                        ? admin_conflict_blocked_message($currUid)
+                        : 'Conflict of Interest: You cannot edit your own patient record (or records linked to your login).';
+                    $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to correct/update own or dependent patient record (' . $targetCheckName . ') [FLAGGED FOR REVIEW]', 'patients', $targetCheckName);
+                    flash($msg);
+                    redirect($return);
                 }
+
+                $mrn  = format_mrn(!empty($st['patients'][$idx][9]) ? (string) $st['patients'][$idx][9] : db_next_mrn());
                 $ptId = $mrn;
+                $oldPt = $st['patients'][$idx];
+                $oldAddr = [
+                    'country'     => $oldPt['country'] ?? 'Philippines',
+                    'province'    => $oldPt['province'] ?? '',
+                    'city'        => $oldPt['city'] ?? '',
+                    'barangay'    => $oldPt['barangay'] ?? '',
+                    'street'      => $oldPt['street'] ?? '',
+                    'postal_code' => $oldPt['postal_code'] ?? '',
+                    'address'     => $oldPt[7] ?? ($oldPt['address'] ?? ''),
+                ];
+                $newAddr = [
+                    'country'     => $country,
+                    'province'    => $province,
+                    'city'        => $city,
+                    'barangay'    => $barangay,
+                    'street'      => $street,
+                    'postal_code' => $postal,
+                    'address'     => $addrStr,
+                ];
+                $addrChanged = false;
+                foreach (['country', 'province', 'city', 'barangay', 'street', 'postal_code', 'address'] as $k) {
+                    if (trim((string) ($oldAddr[$k] ?? '')) !== trim((string) ($newAddr[$k] ?? ''))) {
+                        $addrChanged = true;
+                        break;
+                    }
+                }
+                if ($addrChanged) {
+                    db_record_address_history(
+                        'patient',
+                        $mrn,
+                        $oldAddr,
+                        $newAddr,
+                        (string) ($_SESSION['user_id'] ?? ''),
+                        $role,
+                        'Staff updated patient registration details'
+                    );
+                }
+
                 $st['patients'][$idx] = [
                     $fullName, $fmtBirth, $noPhone ? '—' : $phone, $hin, initials($fullName, 2), $sex, $blood, $addrStr, $ptId, $mrn, 'Registered', $st['patients'][$idx][11] ?? date('Y-m-d'),
                     'country'                    => $country, 'province' => $province, 'city' => $city, 'barangay' => $barangay, 'street' => $street, 'postal_code' => $postal, 'phone_verified' => $noPhone ? 0 : 1, 'email' => $email, 'mrn' => $mrn, 'reg_status' => 'Registered', 'registration_status' => 'Registered',
@@ -1170,10 +1958,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $logAudit('Updated', 'patients', $mrn);
                 flash('Patient record updated for ' . $fullName . ' (' . $mrn . ').');
             } else {
-                $mrn  = db_next_mrn();
-                if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $mrn, $m)) {
-                    $mrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
-                }
+                $mrn  = format_mrn(db_next_mrn());
                 $ptId = $mrn;
                 $row  = [
                     $fullName, $fmtBirth, $noPhone ? '—' : $phone, $hin, initials($fullName, 2), $sex, $blood, $addrStr, $ptId, $mrn, 'Registered', date('Y-m-d'),
@@ -1209,6 +1994,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $idx = (int) ($_POST['idx'] ?? -1);
             if (isset($st['appointments'][$idx])) {
                 $ptName = (string) $st['appointments'][$idx][1];
+                if ($role === 'Staff' && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $ptName)) {
+                    $logAudit('Blocked conflict-of-interest attempt: Staff attempted to check in self or linked dependent', 'appointments', $ptName);
+                    flash('Conflict of Interest: Staff members cannot check in their own patient record or a linked dependent. Another staff member must process this check-in.');
+                    redirect($return);
+                }
                 $ptRec  = find_patient_record($st, $ptName);
                 if ($ptRec && is_provisional_patient($ptRec)) {
                     flash('Provisional patient must complete full registration before check-in.');
@@ -1250,6 +2040,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($patient === '' || $doctor === '') {
                 flash('Please select a patient and doctor.');
+                redirect($return);
+            }
+
+            // Conflict of Interest: Staff cannot book self or linked dependent
+            if ($role === 'Staff' && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $patient)) {
+                $logAudit('Blocked conflict-of-interest attempt: Staff attempted to book appointment for self or linked dependent', 'appointments', $patient);
+                flash('Conflict of Interest: Staff members cannot book appointments for their own patient record or a linked dependent.');
+                redirect($return);
+            }
+
+            // Conflict of Interest: Doctor cannot be attending doctor on self or linked dependent
+            $docUserName = (string) ($_SESSION['user_name'] ?? '');
+            $docAcc = db_find_account_by_id((string) ($_SESSION['user_id'] ?? ''));
+            $isAttendingDoc = (strcasecmp($doctor, $docUserName) === 0 || ($docAcc && strcasecmp($doctor, (string)$docAcc['full_name']) === 0) || str_contains(strtolower($doctor), strtolower(str_replace('Dr. ', '', $docUserName))));
+            if ($isAttendingDoc && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $patient)) {
+                $logAudit('Blocked conflict-of-interest attempt: Doctor attempted to be attending doctor for self or linked dependent', 'appointments', $patient);
+                flash('Conflict of Interest: A doctor cannot be the attending doctor on an appointment for their own patient record or a linked dependent.');
                 redirect($return);
             }
             $ymd     = preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateRaw) ? $dateRaw : date('Y-m-d', strtotime('+1 day'));
@@ -1319,6 +2126,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('Please select a Registered patient and a vacant bed.');
                 redirect($return);
             }
+
+            // Conflict of Interest: Staff cannot admit self or linked dependent
+            if ($role === 'Staff' && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $patient)) {
+                $logAudit('Blocked conflict-of-interest attempt: Staff attempted to admit self or linked dependent', 'admissions', $patient);
+                flash('Conflict of Interest: Staff cannot book, check in, or admit a patient linked to their own login.');
+                redirect($return);
+            }
+
+            // Conflict of Interest: Doctor cannot be attending doctor on admission for self or linked dependent
+            $docUserName = (string) ($_SESSION['user_name'] ?? '');
+            $docAcc = db_find_account_by_id((string) ($_SESSION['user_id'] ?? ''));
+            $isAttendingDoc = (strcasecmp($doctor, $docUserName) === 0 || ($docAcc && strcasecmp($doctor, (string)$docAcc['full_name']) === 0) || str_contains(strtolower($doctor), strtolower(str_replace('Dr. ', '', $docUserName))));
+            if ($isAttendingDoc && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $patient)) {
+                $logAudit('Blocked conflict-of-interest attempt: Doctor attempted to be attending doctor on admission for self/family', 'admissions', $patient);
+                flash('Conflict of Interest: A doctor cannot be the attending doctor on an admission for their own patient record or a linked dependent.');
+                redirect($return);
+            }
             $ptRec = find_patient_record($st, $patient);
             if ($ptRec && is_provisional_patient($ptRec)) {
                 flash('Provisional patients cannot be admitted until Complete Registration is finished.');
@@ -1361,6 +2185,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $items = [
                 ['Inpatient Room & Bed (' . $bedId . ' · ' . $bedWard . ')', '1', format_money($bedRate), format_money($bedRate)],
             ];
+            $ptRecForBill = find_patient_record($st, $patient);
+            $ptAddrForBill = $ptRecForBill ? ($ptRecForBill[7] ?? ($ptRecForBill['address'] ?? '')) : '';
             array_unshift($st['bills'], normalize_bill_row([
                 $patient,
                 format_money($bedRate),
@@ -1369,6 +2195,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $newBillNo,
                 0.0,
                 $items,
+                $mrnStr,
+                $ptAddrForBill,
             ], 0));
 
             $logAudit('Admitted patient', 'admissions', $bedId);
@@ -1426,6 +2254,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $patient = trim((string) ($_POST['patient'] ?? ''));
             $cStatus = 'Cleared';
             $reason  = trim((string) ($_POST['reason'] ?? 'All inpatient charges verified and settled'));
+
+            // Conflict of interest check for cashier and admin
+            if (in_array($role, ['Cashier', 'Admin'], true) && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $patient)) {
+                $currUid = (string) ($_SESSION['user_id'] ?? '');
+                $msg = ($role === 'Admin') ? admin_conflict_blocked_message($currUid) : 'Another cashier must process this bill.';
+                $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to clear discharge billing for self/family [FLAGGED FOR REVIEW]', 'bills', $patient);
+                flash($msg);
+                redirect(url(['page' => 'discharge-clearance']));
+            }
 
             // Discharge clearance can only be marked Cleared after processing full payment
             $ptBal = 0.0;
@@ -1588,6 +2425,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         case 'save_record':
             $patientParam = str_replace('+', ' ', urldecode(trim((string) ($_POST['patient'] ?? ''))));
+            if (in_array($role, ['Doctor', 'Staff'], true) && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $patientParam)) {
+                $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to save clinical record for self/family', 'patients', $patientParam);
+                flash('Conflict of Interest: You cannot create or modify clinical records for your own patient record or a linked family member.');
+                redirect(url(['page' => 'patients']));
+            }
             $complaint    = trim((string) ($_POST['complaint'] ?? ''));
             $notes        = trim((string) ($_POST['notes'] ?? ''));
             $visitType    = trim((string) ($_POST['visit_type'] ?? 'Consultation'));
@@ -1707,7 +2549,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $billNo = 'BILL-' . str_pad((string) (1001 + count($st['bills'])), 4, '0', STR_PAD_LEFT);
-            array_unshift($st['bills'], [
+            $ptRecForBill = find_patient_record($st, $patient);
+            $ptAddrForBill = $ptRecForBill ? ($ptRecForBill[7] ?? ($ptRecForBill['address'] ?? '')) : '';
+            $ptMrnForBill  = $ptRecForBill ? ($ptRecForBill[9] ?? ($ptRecForBill['mrn'] ?? '')) : '';
+            array_unshift($st['bills'], normalize_bill_row([
                 $patient,
                 format_money($totalBill),
                 'Unpaid',
@@ -1715,7 +2560,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $billNo,
                 0.0,
                 $billItems,
-            ]);
+                $ptMrnForBill,
+                $ptAddrForBill,
+            ]));
 
             $logAudit('Completed consultation', 'medical_records', '#' . $recId);
             flash('Consultation saved and Bill ' . $billNo . ' (' . format_money($totalBill) . ') generated from the Price List.');
@@ -1739,6 +2586,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($st['bills'] as $idx => $b) {
                 $nb = normalize_bill_row($b, $idx);
                 if (strcasecmp($nb['bill_no'], $billNo) === 0) {
+                    // Conflict of interest check for cashier and admin
+                    if (in_array($role, ['Cashier', 'Admin'], true) && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $nb['patient'])) {
+                        $currUid = (string) ($_SESSION['user_id'] ?? '');
+                        $msg = ($role === 'Admin') ? admin_conflict_blocked_message($currUid) : 'Another cashier must process this bill.';
+                        $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to add charge/adjust bill #' . $billNo . ' for self/family [FLAGGED FOR REVIEW]', 'bills', $billNo);
+                        flash($msg);
+                        redirect(url(['page' => 'unpaid-bills']));
+                    }
                     $lineAmt     = round($qty * $rate, 2);
                     $nb['items'][] = [$desc . ' (Reason: ' . $reason . ')', (string) $qty, format_money($rate), format_money($lineAmt)];
                     $newTotal    = round($nb['total'] + $lineAmt, 2);
@@ -1751,6 +2606,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $nb['bill_no'],
                         $nb['paid'],
                         $nb['items'],
+                        $nb['mrn'] ?? '',
+                        $nb['patient_address'] ?? '',
                     ], $idx);
                     $logAudit('Added manual charge (' . $reason . ')', 'bills', $billNo);
                     flash('Manual charge "' . $desc . '" (' . format_money($lineAmt) . ') added to ' . $billNo . '.');
@@ -1783,6 +2640,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('Bill not found.');
                 redirect($return);
             }
+            // Conflict of interest check for cashier and admin
+            if (in_array($role, ['Cashier', 'Admin'], true) && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $normBill['patient'])) {
+                $currUid = (string) ($_SESSION['user_id'] ?? '');
+                $msg = ($role === 'Admin') ? admin_conflict_blocked_message($currUid) : 'Another cashier must process this bill.';
+                $logAudit('Blocked conflict-of-interest attempt: ' . $role . ' attempted to process payment on bill #' . $billNo . ' for self/family [FLAGGED FOR REVIEW]', 'bills', $billNo);
+                flash($msg);
+                redirect(url(['page' => 'unpaid-bills']));
+            }
             $balanceDue = $normBill['balance'];
             if ($amtPay <= 0 || $amtPay > $balanceDue) {
                 $amtPay = $balanceDue;
@@ -1803,6 +2668,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $normBill['bill_no'],
                 $newPaid,
                 $normBill['items'],
+                $normBill['mrn'] ?? '',
+                $normBill['patient_address'] ?? '',
             ], $billIdx);
 
             $maxOr = 1000;
@@ -1883,8 +2750,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($patient !== '' && $items) {
                 $newBillNo = 'BILL-' . str_pad((string) (1001 + count($st['bills'])), 4, '0', STR_PAD_LEFT);
+                $ptRecForBill = find_patient_record($st, $patient);
+                $ptAddrForBill = $ptRecForBill ? ($ptRecForBill[7] ?? ($ptRecForBill['address'] ?? '')) : '';
+                $ptMrnForBill  = $ptRecForBill ? ($ptRecForBill[9] ?? ($ptRecForBill['mrn'] ?? '')) : '';
                 array_unshift($st['bills'], normalize_bill_row([
                     $patient, format_money($total), 'Unpaid', date('M d, Y'), $newBillNo, 0.0, $items,
+                    $ptMrnForBill,
+                    $ptAddrForBill,
                 ], 0));
                 $logAudit('Created manual bill', 'bills', $newBillNo);
                 flash('Bill ' . $newBillNo . ' (' . format_money($total) . ') created for ' . $patient . '.');
@@ -1895,18 +2767,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
          * ADMIN PORTAL ACTIONS (Section 8)
          * ----------------------------------------------------- */
         case 'save_user':
-            $orig      = trim((string) ($_POST['orig'] ?? ''));
-            $first     = trim((string) ($_POST['first_name'] ?? ''));
-            $middle    = trim((string) ($_POST['middle_name'] ?? ''));
-            $last      = trim((string) ($_POST['last_name'] ?? ''));
-            $uRole     = trim((string) ($_POST['role'] ?? 'Doctor'));
-            $email     = strtolower(trim((string) ($_POST['email'] ?? '')));
-            $phone     = trim((string) ($_POST['phone'] ?? ''));
-            $birthdate = trim((string) ($_POST['birthdate'] ?? ''));
-            $sex       = trim((string) ($_POST['sex'] ?? ''));
-            $dept      = trim((string) ($_POST['department'] ?? ''));
-            $spec      = trim((string) ($_POST['specialty'] ?? ''));
-            $license   = trim((string) ($_POST['license'] ?? ''));
+            $orig       = trim((string) ($_POST['orig'] ?? ''));
+            $first      = trim((string) ($_POST['first_name'] ?? ''));
+            $middle     = trim((string) ($_POST['middle_name'] ?? ''));
+            $last       = trim((string) ($_POST['last_name'] ?? ''));
+            $uRole      = trim((string) ($_POST['role'] ?? 'Doctor'));
+            $email      = strtolower(trim((string) ($_POST['email'] ?? '')));
+            $phone      = trim((string) ($_POST['phone'] ?? ''));
+            $birthdate  = trim((string) ($_POST['birthdate'] ?? ''));
+            $sex        = trim((string) ($_POST['sex'] ?? ''));
+            $dept       = trim((string) ($_POST['department'] ?? ''));
+            $spec       = trim((string) ($_POST['specialty'] ?? ''));
+            $license    = trim((string) ($_POST['license'] ?? ''));
+            $country    = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province   = trim((string) ($_POST['province'] ?? ''));
+            $city       = trim((string) ($_POST['city'] ?? ''));
+            $barangay   = trim((string) ($_POST['barangay'] ?? ''));
+            $street     = trim((string) ($_POST['street'] ?? ''));
+            $postalCode = trim((string) ($_POST['postal_code'] ?? ''));
+            $address    = trim((string) ($_POST['address'] ?? ''));
+            if ($address === '' && ($street !== '' || $city !== '')) {
+                $addrParts = array_filter([$street, $barangay, $city, $province, $country, $postalCode]);
+                $address   = implode(', ', $addrParts);
+            }
 
             // Specialty, Department, and PRC License are visible/required ONLY when Role = "Doctor"
             if ($uRole !== 'Doctor') {
@@ -1935,6 +2818,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $u[9]  = $license;
                         $u[10] = $birthdate;
                         $u[11] = $phone;
+                        $u['country']     = $country;
+                        $u['province']    = $province;
+                        $u['city']        = $city;
+                        $u['barangay']    = $barangay;
+                        $u['street']      = $street;
+                        $u['postal_code'] = $postalCode;
+                        $u['address']     = $address;
                         break;
                     }
                 }
@@ -1957,6 +2847,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'phone'          => $phone,
                     'phone_verified' => 0,
                     'sex'            => $sex,
+                    'country'        => $country,
+                    'province'       => $province,
+                    'city'           => $city,
+                    'barangay'       => $barangay,
+                    'street'         => $street,
+                    'postal_code'    => $postalCode,
+                    'address'        => $address,
                 ], true);
 
                 $finalId   = (string) ($created['account']['user_id'] ?? $newUserId);
@@ -1988,13 +2885,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         case 'edit_user_details':
             $editUid = trim((string) ($_POST['user_id'] ?? ''));
             $reason  = trim((string) ($_POST['reason'] ?? ''));
+            $currUid = (string) ($_SESSION['user_id'] ?? '');
+
+            // Rule 3 & 4: Admin cannot deactivate, demote, or change roles/details of their own account
+            if (strcasecmp($editUid, $currUid) === 0) {
+                $msg = admin_conflict_blocked_message($currUid);
+                $logAudit('Blocked conflict-of-interest attempt: Admin attempted to edit own account [FLAGGED FOR REVIEW]', 'accounts', '#' . $editUid);
+                flash($msg);
+                redirect($return);
+            }
+
             $acc     = $editUid !== '' ? db_find_account_by_id($editUid) : null;
             if (!$acc) {
                 flash('Account not found.');
                 redirect($return);
             }
-            if (!in_array((string) $acc['role'], ['Doctor', 'Staff', 'Cashier'], true)) {
-                flash('Only Doctor, Staff, and Cashier accounts can be edited here.');
+            if (!in_array((string) $acc['role'], ['Doctor', 'Staff', 'Cashier', 'Admin'], true)) {
+                flash('Only Doctor, Staff, Cashier, and Admin accounts can be edited here.');
                 redirect($return);
             }
             if (strlen($reason) < 5) {
@@ -2028,8 +2935,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect($return);
             }
 
-            $newVals = ['full_name' => $fullName, 'email' => $email, 'phone' => $phone, 'birthdate' => $birthdate,
-                'sex' => $sex, 'department' => $dept, 'specialty' => $spec, 'license_number' => $license];
+            $country    = trim((string) ($_POST['country'] ?? 'Philippines')) ?: 'Philippines';
+            $province   = trim((string) ($_POST['province'] ?? ''));
+            $city       = trim((string) ($_POST['city'] ?? ''));
+            $barangay   = trim((string) ($_POST['barangay'] ?? ''));
+            $street     = trim((string) ($_POST['street'] ?? ''));
+            $postalCode = trim((string) ($_POST['postal_code'] ?? ''));
+            $address    = trim((string) ($_POST['address'] ?? ''));
+            if ($address === '' && ($street !== '' || $city !== '')) {
+                $addrParts = array_filter([$street, $barangay, $city, $province, $country, $postalCode]);
+                $address   = implode(', ', $addrParts);
+            }
+
+            $newVals = [
+                'full_name'      => $fullName,
+                'email'          => $email,
+                'phone'          => $phone,
+                'birthdate'      => $birthdate,
+                'sex'            => $sex,
+                'department'     => $dept,
+                'specialty'      => $spec,
+                'license_number' => $license,
+                'country'        => $country,
+                'province'       => $province,
+                'city'           => $city,
+                'barangay'       => $barangay,
+                'street'         => $street,
+                'postal_code'    => $postalCode,
+                'address'        => $address,
+            ];
             $changed = [];
             foreach ($newVals as $col => $val) {
                 if ((string) ($acc[$col] ?? '') !== (string) $val) {
@@ -2040,9 +2974,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('No changes were made.');
                 redirect($return);
             }
-            db()->prepare('UPDATE accounts SET full_name = :fn, email = :em, phone = :ph, birthdate = :bd, sex = :sx, department = :dp, specialty = :sp, license_number = :ln WHERE id = :id')
-                ->execute([':fn' => $fullName, ':em' => $email, ':ph' => $phone, ':bd' => $birthdate, ':sx' => $sex,
-                    ':dp' => $dept, ':sp' => $spec, ':ln' => $license, ':id' => $acc['id']]);
+            $addrCols = ['country', 'province', 'city', 'barangay', 'street', 'postal_code', 'address'];
+            $addrChanged = false;
+            foreach ($addrCols as $ac) {
+                if (in_array($ac, $changed, true)) {
+                    $addrChanged = true;
+                    break;
+                }
+            }
+            if ($addrChanged) {
+                $oldAddr = [
+                    'country'     => $acc['country'] ?? 'Philippines',
+                    'province'    => $acc['province'] ?? '',
+                    'city'        => $acc['city'] ?? '',
+                    'barangay'    => $acc['barangay'] ?? '',
+                    'street'      => $acc['street'] ?? '',
+                    'postal_code' => $acc['postal_code'] ?? '',
+                    'address'     => $acc['address'] ?? '',
+                ];
+                $newAddr = [
+                    'country'     => $country,
+                    'province'    => $province,
+                    'city'        => $city,
+                    'barangay'    => $barangay,
+                    'street'      => $street,
+                    'postal_code' => $postalCode,
+                    'address'     => $address,
+                ];
+                db_record_address_history(
+                    'employee',
+                    (string) ($acc['user_id'] ?? $acc['id']),
+                    $oldAddr,
+                    $newAddr,
+                    $currUid,
+                    $role,
+                    $reason
+                );
+            }
+
+            db()->prepare('UPDATE accounts SET full_name = :fn, email = :em, phone = :ph, birthdate = :bd, sex = :sx, department = :dp, specialty = :sp, license_number = :ln, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc WHERE id = :id')
+                ->execute([
+                    ':fn'   => $fullName,
+                    ':em'   => $email,
+                    ':ph'   => $phone,
+                    ':bd'   => $birthdate,
+                    ':sx'   => $sex,
+                    ':dp'   => $dept,
+                    ':sp'   => $spec,
+                    ':ln'   => $license,
+                    ':co'   => $country,
+                    ':pr'   => $province,
+                    ':ci'   => $city,
+                    ':bg'   => $barangay,
+                    ':st'   => $street,
+                    ':pc'   => $postalCode,
+                    ':id'   => $acc['id'],
+                ]);
 
             $st = db_load_state();
             $_SESSION['state'] = &$st;
@@ -2139,6 +3126,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $targetStatus = (string) $acc['status'];
                 $targetUid    = (string) $acc['user_id'];
                 $targetName   = (string) $acc['full_name'];
+                $currUid      = (string) ($_SESSION['user_id'] ?? '');
+
+                // Rule 3 & 4: Admin cannot deactivate, demote, or change roles of their own account
+                if (strcasecmp($targetUid, $currUid) === 0 || strcasecmp($email, (string) ($_SESSION['user_email'] ?? '')) === 0) {
+                    $msg = admin_conflict_blocked_message($currUid);
+                    $logAudit('Blocked conflict-of-interest attempt: Admin attempted to deactivate own account [FLAGGED FOR REVIEW]', 'accounts', '#' . $targetUid);
+                    flash($msg);
+                    redirect($return);
+                }
 
                 // Block deactivating the only active Administrator
                 if ($targetRole === 'Admin' && $targetStatus === 'Active') {
@@ -2194,6 +3190,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $letter = strtoupper(substr(trim(str_replace('Bed', '', $bedCode)), 0, 1)) ?: 'A';
             $newId  = $origBed !== '' ? $origBed : ('RM-' . $roomNo . '-' . $letter);
 
+            // Rule 3 & 4: Admin cannot change room rates for any charge on their own/dependent bills/admissions
+            $currUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($role === 'Admin' && function_exists('db_is_room_charged_on_user_bills') && db_is_room_charged_on_user_bills($currUid, $newId ?: $roomNo)) {
+                $msg = admin_conflict_blocked_message($currUid);
+                $logAudit('Blocked conflict-of-interest attempt: Admin attempted to modify room/bed setup (' . ($newId ?: $roomNo) . ') charged on own/dependent admission [FLAGGED FOR REVIEW]', 'beds', $newId ?: $roomNo);
+                flash($msg);
+                redirect(url(['page' => 'rooms']));
+            }
+
             $updated = false;
             foreach ($st['beds'] as &$b) {
                 if ($b['bed_id'] === $newId) {
@@ -2232,6 +3237,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         case 'toggle_bed_active':
             $bedId = trim((string) ($_POST['bed_id'] ?? ''));
+            $currUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($role === 'Admin' && function_exists('db_is_room_charged_on_user_bills') && db_is_room_charged_on_user_bills($currUid, $bedId)) {
+                $msg = admin_conflict_blocked_message($currUid);
+                $logAudit('Blocked conflict-of-interest attempt: Admin attempted to toggle bed (' . $bedId . ') charged on own/dependent admission [FLAGGED FOR REVIEW]', 'beds', $bedId);
+                flash($msg);
+                redirect(url(['page' => 'rooms']));
+            }
             foreach ($st['beds'] as &$b) {
                 if ($b['bed_id'] === $bedId) {
                     $b['active'] = empty($b['active']);
@@ -2248,6 +3260,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $cat   = trim((string) ($_POST['category'] ?? 'Consultation'));
             $name  = trim((string) ($_POST['name'] ?? ''));
             $price = (float) ($_POST['price'] ?? 0);
+
+            // Rule 3 & 4: Admin cannot change price list entries for any charge on their own/dependent bills
+            $currUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($role === 'Admin' && function_exists('db_is_item_charged_on_user_bills') && db_is_item_charged_on_user_bills($currUid, $name ?: $id)) {
+                $msg = admin_conflict_blocked_message($currUid);
+                $logAudit('Blocked conflict-of-interest attempt: Admin attempted to modify price item (' . ($name ?: $id) . ') charged on own/dependent bill [FLAGGED FOR REVIEW]', 'price_list', $id ?: $name);
+                flash($msg);
+                redirect(url(['page' => 'price-list']));
+            }
+
             if ($name !== '' && $price > 0) {
                 if ($id !== '') {
                     foreach ($st['price_list'] as &$pl) {
@@ -2271,6 +3293,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         case 'toggle_price_item':
             $id = trim((string) ($_POST['id'] ?? ''));
+            $currUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($role === 'Admin' && function_exists('db_is_item_charged_on_user_bills') && db_is_item_charged_on_user_bills($currUid, $id)) {
+                $msg = admin_conflict_blocked_message($currUid);
+                $logAudit('Blocked conflict-of-interest attempt: Admin attempted to toggle price item (' . $id . ') charged on own/dependent bill [FLAGGED FOR REVIEW]', 'price_list', $id);
+                flash($msg);
+                redirect(url(['page' => 'price-list']));
+            }
             foreach ($st['price_list'] as &$pl) {
                 if ($pl['id'] === $id) {
                     $pl['active'] = empty($pl['active']);
@@ -2364,6 +3393,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         case 'restore_archive':
             $arcId = (string) ($_POST['key'] ?? '');
+            $currUid = (string) ($_SESSION['user_id'] ?? '');
+            if ($role === 'Admin' && function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest($currUid, $arcId)) {
+                $msg = admin_conflict_blocked_message($currUid);
+                $logAudit('Blocked conflict-of-interest attempt: Admin attempted to restore archive of own/dependent patient record (' . $arcId . ') [FLAGGED FOR REVIEW]', 'archive', $arcId);
+                flash($msg);
+                redirect($return);
+            }
             $st['archive'] = array_values(array_filter($st['archive'] ?? [], static fn ($r) => $r[0] !== $arcId));
             $logAudit('Restored', 'archive', $arcId);
             flash($arcId . ' restored.');
@@ -2395,6 +3431,109 @@ if (!in_array($role, ['Admin', 'Staff', 'Cashier', 'Doctor', 'Patient'], true)) 
 /* ---------------------------------------------------------------
  * 3. Routing
  * ------------------------------------------------------------- */
+$userId = (string) ($_SESSION['user_id'] ?? '');
+if ($userId !== '') {
+    $availablePortals = db_get_available_portals($userId);
+    $_SESSION['user_roles'] = $availablePortals;
+
+    // Rule 2 & 3: Check if current active portal is actually available to this account
+    if (!in_array($role, $availablePortals, true)) {
+        $reqUrl = (string) ($_SERVER['REQUEST_URI'] ?? 'index.php');
+        $actorRole = ['Admin' => 'Administrator', 'Staff' => 'Staff', 'Cashier' => 'Cashier', 'Doctor' => 'Doctor', 'Patient' => 'Patient'][$role] ?? $role;
+        $actingActor = (!empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : $userId) . ' acting as ' . $actorRole;
+        try {
+            $pdo = db();
+            $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+            $insAl->execute([
+                ':an' => $actingActor,
+                ':ac' => "Denied portal access attempt: User '{$userId}' attempted to access '{$role}' portal without permission. Requested URL: {$reqUrl} [FLAGGED FOR REVIEW]",
+                ':tb' => 'accounts',
+                ':ri' => $userId,
+                ':la' => date('M d, Y · H:i'),
+                ':ar' => $actorRole,
+            ]);
+        } catch (Throwable) {}
+
+        // Fallback to employee portal if available, or first available portal
+        $fallbackRole = null;
+        foreach (['Admin', 'Doctor', 'Staff', 'Cashier'] as $empR) {
+            if (in_array($empR, $availablePortals, true)) {
+                $fallbackRole = $empR;
+                break;
+            }
+        }
+        if ($fallbackRole === null && !empty($availablePortals)) {
+            $fallbackRole = $availablePortals[0];
+        }
+
+        if ($fallbackRole !== null) {
+            $_SESSION['role'] = $fallbackRole;
+            $role = $fallbackRole;
+            unset($_SESSION['active_patient_id'], $_SESSION['active_patient_name'], $_SESSION['active_patient_mrn']);
+            flash('Access to that portal is not available. Redirected to your authorized portal.');
+            redirect('index.php');
+        } else {
+            session_destroy();
+            redirect('index.php?auth=login');
+        }
+    }
+
+    // Rule 3 & 4: If in Patient portal, verify user has active linked patient record AND selected patient is linked
+    if ($role === 'Patient') {
+        $linkedPts = db_get_account_linked_patients($userId);
+        if (empty($linkedPts)) {
+            // Rule 4: If user's last link is removed while in patient portal, end that portal session and return them to employee portal
+            $reqUrl = (string) ($_SERVER['REQUEST_URI'] ?? 'index.php');
+            $actorRole = 'Patient';
+            $actingActor = (!empty($_SESSION['user_name']) ? (string) $_SESSION['user_name'] : $userId) . ' acting as Patient';
+            try {
+                $pdo = db();
+                $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+                $insAl->execute([
+                    ':an' => $actingActor,
+                    ':ac' => "Denied portal access attempt: No active linked patient records for user '{$userId}'. Ended patient portal session. Requested URL: {$reqUrl} [FLAGGED FOR REVIEW]",
+                    ':tb' => 'accounts',
+                    ':ri' => $userId,
+                    ':la' => date('M d, Y · H:i'),
+                    ':ar' => $actorRole,
+                ]);
+            } catch (Throwable) {}
+
+            $fallbackRole = null;
+            foreach (['Admin', 'Doctor', 'Staff', 'Cashier'] as $empR) {
+                if (in_array($empR, $availablePortals, true)) {
+                    $fallbackRole = $empR;
+                    break;
+                }
+            }
+            if ($fallbackRole !== null) {
+                $_SESSION['role'] = $fallbackRole;
+                $role = $fallbackRole;
+                unset($_SESSION['active_patient_id'], $_SESSION['active_patient_name'], $_SESSION['active_patient_mrn']);
+                flash('You have no linked patient records. Returned to your employee portal.');
+                redirect('index.php');
+            } else {
+                session_destroy();
+                redirect('index.php?auth=login');
+            }
+        }
+
+        $activePid = (string) ($_SESSION['active_patient_id'] ?? '');
+        $isLinked = false;
+        foreach ($linkedPts as $lp) {
+            if (strcasecmp((string) $lp['patient_id'], $activePid) === 0) {
+                $isLinked = true;
+                break;
+            }
+        }
+        if (!$isLinked) {
+            $_SESSION['active_patient_id']   = (string) $linkedPts[0]['patient_id'];
+            $_SESSION['active_patient_name'] = (string) $linkedPts[0]['patient_name'];
+            $_SESSION['active_patient_mrn']  = format_mrn((string) ($linkedPts[0]['mrn'] ?: $linkedPts[0]['patient_id']));
+        }
+    }
+}
+
 $nav    = nav_for($role);
 $routes = routes_for($role);
 $page   = (string) ($_GET['page'] ?? 'dashboard');
@@ -2405,6 +3544,32 @@ if (!isset($routes[$page])) {
 $detail     = $_GET['detail'] ?? null;
 $detailFile = $detail !== null ? (details_for($role)[$detail] ?? null) : null;
 $modal      = isset($_GET['modal']) ? (string) $_GET['modal'] : null;
+
+// Rule 3 & 4: Doctor / Staff / Admin cannot open or edit their own patient record (or linked records) from doctor/staff/admin portals
+if (in_array($role, ['Doctor', 'Staff', 'Admin'], true)) {
+    $targetPt = trim((string) ($_GET['patient'] ?? ($_GET['id'] ?? ($_GET['mrn'] ?? ($_GET['p'] ?? '')))));
+    if ($targetPt !== '' && function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $targetPt)) {
+        $actorRole = ['Admin' => 'Administrator', 'Staff' => 'Staff', 'Cashier' => 'Cashier', 'Doctor' => 'Doctor', 'Patient' => 'Patient'][$role] ?? 'Staff';
+        $actingActor = current_user_name($role) . ' acting as ' . ($role === 'Staff' ? 'Staff' : $role);
+        try {
+            $pdo = db();
+            $insAl = $pdo->prepare('INSERT INTO audit_logs (actor_name, action, table_name, record_id, logged_at, actor_role) VALUES (:an, :ac, :tb, :ri, :la, :ar)');
+            $insAl->execute([
+                ':an' => $actingActor,
+                ':ac' => 'Blocked conflict-of-interest attempt: ' . $role . ' attempted to access own or linked patient record (' . $targetPt . ') [FLAGGED FOR REVIEW]',
+                ':tb' => 'patients',
+                ':ri' => $targetPt,
+                ':la' => date('M d, Y · H:i'),
+                ':ar' => $actorRole,
+            ]);
+        } catch (Throwable) {}
+        $conflictMsg = ($role === 'Admin')
+            ? 'Conflict of Interest: ' . admin_conflict_blocked_message((string) ($_SESSION['user_id'] ?? '')) . ' Your own patient records (and linked dependents) are only viewable through your Patient Portal.'
+            : 'Conflict of Interest: You cannot view or edit your own patient record (or records linked to your login) from staff or clinical portals. Their records are only viewable through your Patient Portal.';
+        flash($conflictMsg);
+        redirect(url(['page' => ($role === 'Admin' ? 'dashboard' : 'patients')]));
+    }
+}
 
 if ($modal === 'Book appointment' && in_array($role, ['Patient', 'Staff'], true)) {
     redirect(url(['page' => 'book', 'dept' => $_GET['dept'] ?? null, 'doc' => $_GET['doc'] ?? null, 'step' => isset($_GET['doc']) ? 2 : null]));

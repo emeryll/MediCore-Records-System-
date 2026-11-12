@@ -175,6 +175,9 @@ $isProcessingStep = ($selectedBill !== null && $reqPt !== '');
     $balNum  = round($selectedBill['balance'], 2);
     $isPaid  = $selectedBill['status'] === 'Paid' || $balNum <= 0.009;
     $ptBills = array_values(array_filter($allBills, static fn ($b) => strcasecmp($b['patient'], $reqPt) === 0));
+
+    // Rule 4: Conflict of interest block for Cashier
+    $isConflict = function_exists('db_is_patient_conflict_of_interest') && db_is_patient_conflict_of_interest((string) ($_SESSION['user_id'] ?? ''), $reqPt);
     ?>
 
     <?= page_title(
@@ -182,6 +185,16 @@ $isProcessingStep = ($selectedBill !== null && $reqPt !== '');
         'MRN: ' . e($mrnStr) . ' · Invoice ' . e($selectedBill['bill_no']) . ' · Record collection with required proof upload for HMO and PhilHealth claims.',
         button('← Back to Patient List', ['variant' => 'secondary', 'href' => url(['page' => 'process-payment'])])
     ) ?>
+
+    <?php if ($isConflict): ?>
+        <div class="alert alert-danger" style="background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:16px 20px; border-radius:10px; font-weight:600; margin-bottom:20px; display:flex; align-items:center; gap:12px;" role="alert">
+            <?= icon('shield', 22) ?>
+            <div>
+                <strong style="display:block; font-size:14px; margin-bottom:2px;">Conflict-of-Interest Restriction</strong>
+                <span>Another cashier must process this bill. Cashiers cannot collect, void, adjust, or add charges to bills belonging to their own login or linked dependents.</span>
+            </div>
+        </div>
+    <?php endif; ?>
 
     <!-- Bill Selector Tab if Patient has multiple bills -->
     <?php if (count($ptBills) > 1): ?>
@@ -376,8 +389,8 @@ $isProcessingStep = ($selectedBill !== null && $reqPt !== '');
                         <strong id="pay-change-value" style="font-size:22px; color:var(--teal-800);">₱0.00</strong>
                     </div>
 
-                    <button type="submit" id="pay-submit-btn" class="btn btn-primary" style="width:100%; height:44px; font-size:13px;">
-                        <?= icon('shield', 18) ?><span>Confirm Payment &amp; Issue Receipt</span>
+                    <button type="submit" id="pay-submit-btn" class="btn btn-primary" style="width:100%; height:44px; font-size:13px; <?= $isConflict ? 'opacity:0.5; pointer-events:none;' : '' ?>" <?= $isConflict ? 'disabled' : '' ?>>
+                        <?= icon('shield', 18) ?><span><?= $isConflict ? 'Another cashier must process this bill' : 'Confirm Payment &amp; Issue Receipt' ?></span>
                     </button>
                 </form>
 

@@ -12,6 +12,14 @@ if ($actStep > 1 && $actPhone === '') {
     $actStep = 1;
 }
 unset($_SESSION['activate_error'], $_SESSION['register_error']);
+
+// Clean up any pending registration invite simulated SMS messages
+if (!empty($_SESSION['sim_messages']) && is_array($_SESSION['sim_messages'])) {
+    $_SESSION['sim_messages'] = array_values(array_filter(
+        $_SESSION['sim_messages'],
+        static fn ($m) => stripos((string) ($m['message'] ?? ''), 'activate your Patient Portal account') === false
+    ));
+}
 ?>
 <!doctype html>
 <html lang="en">
@@ -54,7 +62,6 @@ unset($_SESSION['activate_error'], $_SESSION['register_error']);
         <div class="login-card">
             <a class="back-link" href="index.php" style="margin-bottom:14px;">← Back to home</a>
             <div class="mobile-login-logo"><?= logo() ?></div>
-            <?= render_sim_banners() ?>
 
             <p class="eyebrow">Step <?= $actStep ?> of 3 · Patient Portal Activation</p>
             <h2><?= match ($actStep) {

@@ -197,6 +197,7 @@ $headerActions = button('Add account', ['icon' => 'plus', 'href' => url(['page' 
                             $deptSpec   = trim(($u[5] ?? '') . (($u[5] ?? '') !== '' && ($u[6] ?? '') !== '' ? ' · ' : '') . ($u[6] ?? ''));
                             $prcLic     = (string) ($u[9] ?? '—');
                             $uPhone     = (string) ($u[11] ?? '');
+                            $isSelfAccount = (strcasecmp((string) $uId, (string) ($_SESSION['user_id'] ?? '')) === 0) || (strcasecmp((string) ($u[1] ?? ''), (string) ($_SESSION['user_email'] ?? '')) === 0);
                             $ptDob      = '—';
                             $ptAgeStr   = '—';
                             if ($uRoleLabel === 'Patient') {
@@ -248,8 +249,11 @@ $headerActions = button('Add account', ['icon' => 'plus', 'href' => url(['page' 
                                     <?php else: ?>
                                     <div class="row-actions" style="flex-wrap:wrap; gap:8px;">
                                         <a href="<?= e(url(['page' => 'users', 'modal' => 'User details', 'user_id' => $uId, 'email' => $u[1]])) ?>" style="display:inline-flex; align-items:center; gap:4px;"><?= icon('eye', 15) ?> Details</a>
-                                        <?php if (in_array($uRoleLabel, ['Doctor', 'Staff', 'Cashier'], true)): ?>
+                                        <?php if (in_array($uRoleLabel, ['Doctor', 'Staff', 'Cashier', 'Admin'], true) && !$isSelfAccount): ?>
                                         <a href="<?= e(url(['page' => 'users', 'modal' => 'Edit user', 'user_id' => $uId, 'email' => $u[1]])) ?>"><?= icon('edit', 15) ?> Edit</a>
+                                        <?php endif; ?>
+                                        <?php if ($uRoleLabel === 'Patient'): ?>
+                                        <a href="<?= e(url(['page' => 'users', 'modal' => 'Correct patient address', 'patient' => $u[0], 'user_id' => $uId])) ?>" style="display:inline-flex; align-items:center; gap:4px;"><?= icon('edit', 15) ?> Correct Address</a>
                                         <?php endif; ?>
                                         <?php if ($uStatus === 'Pending'): ?>
                                             <?= post_button('Resend Activation Email', 'resend_activation_email', ['user_id' => $uId, 'email' => $u[1], 'name' => $u[0], 'role' => $uRoleLabel], [
@@ -265,12 +269,16 @@ $headerActions = button('Add account', ['icon' => 'plus', 'href' => url(['page' 
                                             ? 'Are you sure you want to deactivate this Administrator account for turnover? All records managed by this administrator will be preserved and moved to the Archive.'
                                             : 'Are you sure you want to ' . ($uStatus === 'Active' ? 'deactivate' : 'reactivate') . ' this account?';
                                         ?>
-                                        <?= post_button('', 'toggle_user', ['email' => $u[1], 'role' => $uRoleLabel], [
-                                            'plain'       => true,
-                                            'class'       => $uStatus === 'Active' ? 'danger-link' : 'text-link',
-                                            'html'        => $uStatus === 'Active' ? ($uRoleLabel === 'Admin' ? 'Deactivate (Turnover)' : 'Deactivate') : 'Reactivate',
-                                            'confirm_msg' => $deactivateConfirm,
-                                        ]) ?>
+                                        <?php if ($isSelfAccount && $uRoleLabel === 'Admin'): ?>
+                                            <span style="font-size:11px; color:var(--gray-500); font-style:italic;" title="Under conflict-of-interest rules, an administrator cannot deactivate or change roles on their own account. Another admin must do this.">Own account (Protected)</span>
+                                        <?php else: ?>
+                                            <?= post_button('', 'toggle_user', ['email' => $u[1], 'role' => $uRoleLabel], [
+                                                'plain'       => true,
+                                                'class'       => $uStatus === 'Active' ? 'danger-link' : 'text-link',
+                                                'html'        => $uStatus === 'Active' ? ($uRoleLabel === 'Admin' ? 'Deactivate (Turnover)' : 'Deactivate') : 'Reactivate',
+                                                'confirm_msg' => $deactivateConfirm,
+                                            ]) ?>
+                                        <?php endif; ?>
                                     </div>
                                     <?php endif; ?>
                                 </td>

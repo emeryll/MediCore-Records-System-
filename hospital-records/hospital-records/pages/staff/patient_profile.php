@@ -143,8 +143,16 @@ $ptRecords = patient_medical_records($state, $ptName, (string) ($pt[8] ?? ''));
         <?php endif; ?>
 
         <div class="panel" style="padding:14px; background:#f8fafc; margin-top:14px;">
-            <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Residential Address</span>
-            <strong style="font-size:14px; color:var(--navy-900);"><?= e($isProv ? 'Not yet collected (Provisional)' : $addr) ?></strong>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <span style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--gray-500); display:block;">Residential Address</span>
+                <?php if (!$isProv): ?>
+                    <a href="<?= e(url(['page' => 'patients', 'detail' => 'profile', 'patient' => $ptName, 'modal' => ($role === 'Admin' ? 'Correct patient address' : 'Edit patient address')])) ?>" class="btn btn-secondary btn-sm" style="display:inline-flex; align-items:center; gap:5px; font-size:12px; height:28px;">
+                        <?= icon('edit', 14) ?>
+                        <span>Edit Address</span>
+                    </a>
+                <?php endif; ?>
+            </div>
+            <strong style="font-size:14px; color:var(--navy-900); display:block;"><?= e($isProv ? 'Not yet collected (Provisional)' : $addr) ?></strong>
         </div>
 
         <div class="panel" style="padding:14px; background:#f8fafc; margin-top:14px;">
