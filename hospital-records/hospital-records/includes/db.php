@@ -1070,8 +1070,8 @@ function db_create_account(array $input, bool $fromAdmin = false): array
     $now  = date('M d, Y · H:i');
 
     $ins = $pdo->prepare('INSERT INTO accounts
-        (user_id, username, email, password_hash, full_name, role, user_role_label, status, department, specialty, license_number, birthdate, phone, phone_verified, address, country, province, city, barangay, street, postal_code, sex, last_login, created_at)
-        VALUES (:uid, :uname, :email, :hash, :fname, :role, :rlabel, :status, :dept, :spec, :lic, :bdate, :ph, :pv, :addr, :co, :pr, :ci, :bg, :st, :pc, :sx, :llogin, :cat)');
+        (user_id, username, email, password_hash, full_name, role, status, department, specialty, license_number, birthdate, phone, phone_verified, country, province, city, barangay, street, postal_code, sex, last_login, created_at)
+        VALUES (:uid, :uname, :email, :hash, :fname, :role, :status, :dept, :spec, :lic, :bdate, :ph, :pv, :co, :pr, :ci, :bg, :st, :pc, :sx, :llogin, :cat)');
     $ins->execute([
         ':uid'    => $userId,
         ':uname'  => $username,
@@ -1079,7 +1079,6 @@ function db_create_account(array $input, bool $fromAdmin = false): array
         ':hash'   => $hash,
         ':fname'  => $fullName,
         ':role'   => $role,
-        ':rlabel' => $roleLabel,
         ':status' => $status,
         ':dept'   => $dept,
         ':spec'   => $spec,
@@ -1087,7 +1086,6 @@ function db_create_account(array $input, bool $fromAdmin = false): array
         ':bdate'  => $birthdate,
         ':ph'     => $phone,
         ':pv'     => $phoneVerified,
-        ':addr'   => $address,
         ':co'     => $country,
         ':pr'     => $province,
         ':ci'     => $city,
@@ -1601,8 +1599,8 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
 
     if ($kind === 'user_account' && is_array($data)) {
         $ins = $pdo->prepare('INSERT INTO accounts
-            (user_id, username, email, password_hash, full_name, role, user_role_label, status, department, specialty, license_number, last_login, created_at)
-            VALUES (:uid, :un, :em, :pw, :fn, :r, :rl, :st, :dp, :sp, :lc, :ll, :ca)');
+            (user_id, username, email, password_hash, full_name, role, status, department, specialty, license_number, last_login, created_at)
+            VALUES (:uid, :un, :em, :pw, :fn, :r, :st, :dp, :sp, :lc, :ll, :ca)');
         try {
             $ins->execute([
                 ':uid' => $data['user_id'],
@@ -1611,7 +1609,6 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
                 ':pw'  => $data['password_hash'],
                 ':fn'  => $data['full_name'],
                 ':r'   => $data['role'],
-                ':rl'  => $data['user_role_label'],
                 ':st'  => $data['status'] ?? 'Active',
                 ':dp'  => $data['department'] ?? '',
                 ':sp'  => $data['specialty'] ?? '',
@@ -1657,18 +1654,24 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
             $state['roles'][] = $data;
         }
     } elseif ($kind === 'patient' && is_array($data)) {
-        $ins = $pdo->prepare('INSERT INTO patients (patient_id, full_name, birthdate, phone, insurance_no, avatar, sex, blood_type, address, country, province, city, barangay, street, postal_code, phone_verified, status, created_at) VALUES (:pid, :fn, :bd, :ph, :in, :av, :sx, :bt, :ad, :co, :pr, :ci, :bg, :st, :pc, :pv, :stt, :ca)');
+        $fnParts = explode(' ', trim((string) ($data['full_name'] ?? '')));
+        $fnm = !empty($data['first_name']) ? (string) $data['first_name'] : ($fnParts[0] ?? '');
+        $lnm = !empty($data['last_name']) ? (string) $data['last_name'] : (count($fnParts) > 1 ? end($fnParts) : '');
+        $mnm = !empty($data['middle_name']) ? (string) $data['middle_name'] : (count($fnParts) > 2 ? $fnParts[1] : '');
+        $ins = $pdo->prepare('INSERT INTO patients (patient_id, mrn, first_name, middle_name, last_name, birthdate, phone, insurance_no, avatar, sex, blood_type, country, province, city, barangay, street, postal_code, phone_verified, status, created_at) VALUES (:pid, :mrn, :fnm, :mnm, :lnm, :bd, :ph, :in, :av, :sx, :bt, :co, :pr, :ci, :bg, :st, :pc, :pv, :stt, :ca)');
         try {
             $ins->execute([
                 ':pid' => $data['patient_id'],
-                ':fn'  => $data['full_name'],
+                ':mrn' => $data['mrn'] ?? $data['patient_id'],
+                ':fnm' => $fnm,
+                ':mnm' => $mnm,
+                ':lnm' => $lnm,
                 ':bd'  => $data['birthdate'],
                 ':ph'  => $data['phone'],
                 ':in'  => $data['insurance_no'] ?? '—',
                 ':av'  => $data['avatar'] ?? 'PT',
                 ':sx'  => $data['sex'] ?? 'Not specified',
                 ':bt'  => $data['blood_type'] ?? 'Not specified',
-                ':ad'  => $data['address'] ?? '—',
                 ':co'  => $data['country'] ?? 'Philippines',
                 ':pr'  => $data['province'] ?? '',
                 ':ci'  => $data['city'] ?? '',
@@ -1681,7 +1684,7 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
             ]);
             if (!empty($payload['account']) && is_array($payload['account'])) {
                 $accData = $payload['account'];
-                $insAcc = $pdo->prepare('INSERT INTO accounts (user_id, username, email, password_hash, full_name, role, user_role_label, status, department, specialty, license_number, last_login, created_at) VALUES (:uid, :un, :em, :pw, :fn, :r, :rl, :st, :dp, :sp, :lc, :ll, :ca)');
+                $insAcc = $pdo->prepare('INSERT INTO accounts (user_id, username, email, password_hash, full_name, role, status, department, specialty, license_number, last_login, created_at) VALUES (:uid, :un, :em, :pw, :fn, :r, :st, :dp, :sp, :lc, :ll, :ca)');
                 try {
                     $insAcc->execute([
                         ':uid' => $accData['user_id'],
@@ -1690,7 +1693,6 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
                         ':pw'  => $accData['password_hash'],
                         ':fn'  => $accData['full_name'],
                         ':r'   => $accData['role'],
-                        ':rl'  => $accData['user_role_label'],
                         ':st'  => $accData['status'] ?? 'Active',
                         ':dp'  => $accData['department'] ?? '',
                         ':sp'  => $accData['specialty'] ?? '',

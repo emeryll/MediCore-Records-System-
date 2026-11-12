@@ -457,15 +457,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $up   = db()->prepare('UPDATE accounts SET password_hash = :pw, status = "Active", force_password_change = 0, set_password_token = "", set_password_expires_at = 0 WHERE id = :id');
             $up->execute([':pw' => $hash, ':id' => $acc['id']]);
 
-            unset($_SESSION['force_pw_change_uid'], $_SESSION['set_pw_error']);
-            $_SESSION['role']      = (string) $acc['role'];
-            $_SESSION['user_id']   = (string) $acc['user_id'];
-            $_SESSION['user_name'] = $acc['role'] === 'Doctor' && !str_starts_with((string) $acc['full_name'], 'Dr.')
+            // Clear any previous active session (e.g. if Admin opened the activation link in the same browser)
+            unset(
+                $_SESSION['force_pw_change_uid'],
+                $_SESSION['set_pw_error'],
+                $_SESSION['role'],
+                $_SESSION['login_role'],
+                $_SESSION['user_id'],
+                $_SESSION['user_name'],
+                $_SESSION['user_email'],
+                $_SESSION['user_roles'],
+                $_SESSION['active_patient_id'],
+                $_SESSION['active_patient_name'],
+                $_SESSION['active_patient_mrn']
+            );
+            $actorName = $acc['role'] === 'Doctor' && !str_starts_with((string) $acc['full_name'], 'Dr.')
                 ? 'Dr. ' . $acc['full_name']
                 : (string) $acc['full_name'];
-            $logAudit('Activated account and set personal password', 'accounts', '#' . $acc['user_id'], $_SESSION['user_name'] . ' acting as ' . ($acc['role'] === 'Staff' ? 'Staff' : $acc['role']), $acc['role'] === 'Admin' ? 'Administrator' : $acc['role']);
-            flash('Account activated! Personal password saved. Welcome to your West Metro Medical Center portal.');
-            redirect('index.php');
+            $logAudit('Activated account and set personal password', 'accounts', '#' . $acc['user_id'], $actorName . ' acting as ' . ($acc['role'] === 'Staff' ? 'Staff' : $acc['role']), $acc['role'] === 'Admin' ? 'Administrator' : $acc['role']);
+            $_SESSION['login_identifier']  = (string) (!empty($acc['email']) ? $acc['email'] : $acc['user_id']);
+            $_SESSION['login_success_msg'] = 'Account activated! Your personal password has been saved. Please sign in below using your email and password.';
+            redirect('index.php?auth=login');
 
         /* -------------------------------------------------------
          * UNIFIED LOGIN (Phone or Email + Password)
@@ -2856,7 +2868,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'address'        => $address,
                 ], true);
 
+                if (!empty($created['error'])) {
+                    flash($created['error']);
+                    redirect($return);
+                }
+
                 $finalId   = (string) ($created['account']['user_id'] ?? $newUserId);
+                db_add_user_role($finalId, $uRole);
                 $token     = bin2hex(random_bytes(24)); // Secure single-use token
                 $expiresAt = time() + (24 * 3600);      // 24 hours validity
                 db()->prepare('UPDATE accounts SET status = "Pending", force_password_change = 1, set_password_token = :tk, set_password_expires_at = :exp WHERE UPPER(user_id) = :uid')
@@ -3411,9 +3429,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 /* ---------------------------------------------------------------
  * 2. Not signed in -> landing page, login screen, or patient activation screen
  * ------------------------------------------------------------- */
-$role = $_SESSION['role'] ?? null;
-if (!in_array($role, ['Admin', 'Staff', 'Cashier', 'Doctor', 'Patient'], true)) {
-    $authView = (string) ($_GET['auth'] ?? '');
+$authView = (string) ($_GET['auth'] ?? '');
+$role     = $_SESSION['role'] ?? null;
+if (!empty($_GET['set_password']) || in_array($authView, ['login', 'register', 'activate'], true) || !in_array($role, ['Admin', 'Staff', 'Cashier', 'Doctor', 'Patient'], true)) {
     if (in_array($authView, ['register', 'activate'], true) || !empty($_SESSION['register_error']) || !empty($_SESSION['activate_error'])) {
         require __DIR__ . '/pages/register.php';
         exit;
@@ -3422,6 +3440,7 @@ if (!in_array($role, ['Admin', 'Staff', 'Cashier', 'Doctor', 'Patient'], true)) 
         unset($_SESSION['force_pw_change_uid'], $_SESSION['set_pw_error']);
     }
     $showLogin = $authView === 'login'
+        || !empty($_GET['set_password'])
         || !empty($_SESSION['login_error'])
         || !empty($_SESSION['reset_sent']);
     require __DIR__ . ($showLogin ? '/pages/login.php' : '/pages/landing.php');

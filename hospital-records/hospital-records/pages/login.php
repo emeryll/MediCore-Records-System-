@@ -122,9 +122,16 @@ if (!$isForgot && !$isVerify) {
                     <input type="hidden" name="uid" value="<?= e($setPwUid) ?>">
                     <input type="hidden" name="token" value="<?= e($setPwToken) ?>">
 
-                    <?php if ($setPwUid !== ''): ?>
-                        <div class="panel" style="padding:12px 14px; background:var(--teal-50); border:1px solid var(--teal-200); margin-bottom:14px; font-size:13px;">
-                            Account ID: <strong><?= e($setPwUid) ?></strong>
+                    <?php if ($setPwUid !== ''):
+                        $setPwAcc = function_exists('db_find_account_by_id') ? db_find_account_by_id($setPwUid) : null;
+                    ?>
+                        <div class="panel" style="padding:12px 14px; background:var(--teal-50); border:1px solid var(--teal-200); margin-bottom:14px; font-size:13px; line-height:1.6;">
+                            <?php if ($setPwAcc): ?>
+                                <div>Employee: <strong><?= e((string) ($setPwAcc['full_name'] ?? '')) ?></strong> (<?= e((string) ($setPwAcc['role'] ?? '')) ?>)</div>
+                                <div>Email: <strong><?= e((string) ($setPwAcc['email'] ?? '')) ?></strong> · Account ID: <code><?= e($setPwUid) ?></code></div>
+                            <?php else: ?>
+                                Account ID: <strong><?= e($setPwUid) ?></strong>
+                            <?php endif; ?>
                         </div>
                     <?php else: ?>
                         <?= field('Account ID or Email', 'uid', 'e.g. D-1001, S-1001, C-1001, or email', 'text', '', ['required' => true]) ?>
@@ -133,7 +140,7 @@ if (!$isForgot && !$isVerify) {
                     <?= field('New password (min. 8 characters)', 'password', 'Create your password', 'password', '', ['required' => true]) ?>
                     <?= field('Confirm new password', 'confirm_password', 'Re-enter your password', 'password', '', ['required' => true]) ?>
 
-                    <button class="btn btn-primary" type="submit" style="width:100%; margin-top:8px;"><span>Save password &amp; continue</span></button>
+                    <button class="btn btn-primary" type="submit" style="width:100%; margin-top:8px;"><span>Save password &amp; activate account</span></button>
                 </form>
 
             <?php elseif ($isForgot): ?>
