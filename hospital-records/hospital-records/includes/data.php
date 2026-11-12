@@ -157,9 +157,14 @@ function current_user_name(string $role): string
         }
         if (function_exists('db')) {
             try {
-                $r = db()->query("SELECT full_name FROM accounts WHERE role = 'Admin' OR user_id = 'A-0001' ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
-                if ($r && !empty($r['full_name'])) {
-                    return (string) $r['full_name'];
+                $r = db()->query("SELECT user_id, role, first_name, middle_name, last_name FROM accounts WHERE role = 'Admin' OR user_id = 'A-0001' ORDER BY id ASC LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+                if ($r) {
+                    $fn = function_exists('db_format_account_name')
+                        ? db_format_account_name($r)
+                        : trim(($r['first_name'] ?? '') . ' ' . (!empty($r['middle_name']) ? $r['middle_name'] . ' ' : '') . ($r['last_name'] ?? ''));
+                    if ($fn !== '') {
+                        return $fn;
+                    }
                 }
             } catch (Throwable) {}
         }

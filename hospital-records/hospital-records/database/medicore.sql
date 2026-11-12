@@ -21,12 +21,12 @@ USE `medicore_records`;
 CREATE TABLE accounts (
         id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY AUTO_INCREMENT,
         user_id VARCHAR(20) NOT NULL UNIQUE,
-        username VARCHAR(100) NOT NULL UNIQUE,
+        first_name VARCHAR(80) DEFAULT NULL,
+        middle_name VARCHAR(80) DEFAULT NULL,
+        last_name VARCHAR(80) DEFAULT NULL,
         email VARCHAR(150) NOT NULL UNIQUE,
         password_hash VARCHAR(255) NOT NULL,
-        full_name VARCHAR(150) NOT NULL,
         role VARCHAR(30) NOT NULL,
-        user_role_label VARCHAR(40) NOT NULL DEFAULT 'Patient',
         status VARCHAR(20) NOT NULL DEFAULT 'Active',
         department VARCHAR(100) NOT NULL DEFAULT '',
         specialty VARCHAR(120) NOT NULL DEFAULT '',
@@ -36,12 +36,12 @@ CREATE TABLE accounts (
     , birthdate VARCHAR(40) NOT NULL DEFAULT '') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Dumping data for table `accounts`
-INSERT INTO `accounts` (`id`, `user_id`, `username`, `email`, `password_hash`, `full_name`, `role`, `user_role_label`, `status`, `department`, `specialty`, `license_number`, `last_login`, `created_at`, `birthdate`) VALUES
-  (1, 'A-0001', 'admin', 'solonmedea582@gmail.com', '$2y$10$VLLUY/DyAlm78t3phvNqCO5g1vf7vOoFD4xPtsHPTN3B9yTca6Fc6', 'Medea Solon', 'Admin', 'Administrator', 'Active', '', '', '', 'Nov 04, 2026 \302\267 05:53', 'Oct 29, 2026 \302\267 07:35', ''),
-  (2, 'D-1001', 'meryll', 'evangelistameryll@gmail.com', '$2y$10$Xkcqej5WDf7uEErflfhpKOg/W/PKRksPxXOMfZ7Msa3HTh7uESth.', 'Meryll Silvano Evangelista', 'Doctor', 'Doctor', 'Active', 'General Medicine', 'Internal Medicine', 12345678, 'Oct 29, 2026 \302\267 11:08', 'Oct 29, 2026 \302\267 09:01', ''),
-  (3, 'P-1001', 'emeryll', 'evangelistamerylljoy@gmail.com', '$2y$10$6Vzx2N0F6d6EUUHJEKqOa.Czoqst/QrprDXFJIE2Mf0QqMa667MfO', 'Meryll Joy Evangelista', 'Patient', 'Patient', 'Active', '', '', '', 'Oct 29, 2026 \302\267 11:02', 'Oct 29, 2026 \302\267 09:03', 'Apr 25, 2007'),
-  (4, 'S-1001', 'jereme', 'evangelistajereme@gmail.com', '$2y$10$RTCglV4cqujJ6nnyH3F/be6MZVE8ZqCZGdDpate6/q9QSnUjrplEe', 'Jereme Silvano Evangelista', 'Staff', 'Staff', 'Active', 'General Medicine', '', '', 'Nov 04, 2026 \302\267 05:55', 'Oct 29, 2026 \302\267 10:04', ''),
-  (5, 'C-1001', 'jae', 'evangelistamerylljae@gmail.com', '$2y$10$uNapGdVaZl6dLOFGMh6dCel1JR4IlwOmdyL83r2FybfTve4hW2N9K', 'Jae Silvano Evangelista', 'Cashier', 'Cashier', 'Active', 'General Medicine', '', '', 'Oct 29, 2026 \302\267 12:51', 'Oct 29, 2026 \302\267 10:49', '');
+INSERT INTO `accounts` (`id`, `user_id`, `first_name`, `middle_name`, `last_name`, `email`, `password_hash`, `role`, `status`, `department`, `specialty`, `license_number`, `last_login`, `created_at`, `birthdate`) VALUES
+  (1, 'A-0001', 'Medea', NULL, 'Solon', 'solonmedea582@gmail.com', '$2y$10$VLLUY/DyAlm78t3phvNqCO5g1vf7vOoFD4xPtsHPTN3B9yTca6Fc6', 'Admin', 'Active', '', '', '', 'Nov 04, 2026 \302\267 05:53', 'Oct 29, 2026 \302\267 07:35', ''),
+  (2, 'D-1001', 'Meryll', 'Silvano', 'Evangelista', 'evangelistameryll@gmail.com', '$2y$10$Xkcqej5WDf7uEErflfhpKOg/W/PKRksPxXOMfZ7Msa3HTh7uESth.', 'Doctor', 'Active', 'General Medicine', 'Internal Medicine', 12345678, 'Oct 29, 2026 \302\267 11:08', 'Oct 29, 2026 \302\267 09:01', ''),
+  (3, 'P-1001', NULL, NULL, NULL, 'evangelistamerylljoy@gmail.com', '$2y$10$6Vzx2N0F6d6EUUHJEKqOa.Czoqst/QrprDXFJIE2Mf0QqMa667MfO', 'Patient', 'Active', '', '', '', 'Oct 29, 2026 \302\267 11:02', 'Oct 29, 2026 \302\267 09:03', 'Apr 25, 2007'),
+  (4, 'S-1001', 'Jereme', 'Silvano', 'Evangelista', 'evangelistajereme@gmail.com', '$2y$10$RTCglV4cqujJ6nnyH3F/be6MZVE8ZqCZGdDpate6/q9QSnUjrplEe', 'Staff', 'Active', 'General Medicine', '', '', 'Nov 04, 2026 \302\267 05:55', 'Oct 29, 2026 \302\267 10:04', ''),
+  (5, 'C-1001', 'Jae', 'Silvano', 'Evangelista', 'evangelistamerylljae@gmail.com', '$2y$10$uNapGdVaZl6dLOFGMh6dCel1JR4IlwOmdyL83r2FybfTve4hW2N9K', 'Cashier', 'Active', 'General Medicine', '', '', 'Oct 29, 2026 \302\267 12:51', 'Oct 29, 2026 \302\267 10:49', '');
 
 -- -------------------------------------------------------------
 -- Table structure for `roles`

@@ -52,10 +52,8 @@ if (!empty($_GET['switch_patient']) && ($_SESSION['role'] ?? '') === 'Patient') 
     $targetPid  = strtoupper(trim((string) $_GET['switch_patient']));
     $accountUid = (string) ($_SESSION['user_id'] ?? '');
     if (db_is_patient_linked($accountUid, $targetPid)) {
-        $pdo = db();
-        $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND (status IS NULL OR status != "Archived") LIMIT 1');
-        $stmt->execute([':pid' => $targetPid]);
-        if ($pt = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $pt = db_find_patient_by_id($targetPid);
+        if ($pt) {
             $swMrn = (string) ($pt['mrn'] ?: $pt['patient_id']);
             if (preg_match('/^(?:MRN|P)-?0*(\d+)$/i', $swMrn, $m)) {
                 $swMrn = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
@@ -182,6 +180,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->execute([':ph' => $cleanPhone, ':p10' => '%' . substr($cleanPhone, -10)]);
                 $anyPt = $stmt->fetch(PDO::FETCH_ASSOC);
                 if ($anyPt) {
+                    $anyPt['full_name'] = trim(($anyPt['first_name'] ?? '') . ' ' . (!empty($anyPt['middle_name']) ? $anyPt['middle_name'] . ' ' : '') . ($anyPt['last_name'] ?? ''));
                     if (is_provisional_patient($anyPt)) {
                         $err = 'Your record (' . $anyPt['full_name'] . ') is currently Provisional (phone-in booking). Please complete full registration in person at the Front Desk to receive your MRN before activating your online portal account.';
                     } elseif (!empty($anyPt['no_phone'])) {
@@ -273,10 +272,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect('index.php?auth=activate&step=3');
             }
 
-            $pdo  = db();
-            $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
-            $stmt->execute([':pid' => $targetPid]);
-            $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+            $pt = db_find_patient_by_id($targetPid);
 
             if (!$pt || !match_birthdates($inputBdate, (string) ($pt['birthdate'] ?? ''))) {
                 $_SESSION[$attemptKey] = $attempts + 1;
@@ -355,13 +351,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!preg_match('/^P-?[A-Z0-9]+$/i', $userId)) {
                 $userId = db_next_user_id('P');
             }
-            $fullName = (string) $primaryPt['full_name'];
+            $fullName = trim(($primaryPt['first_name'] ?? '') . ' ' . (!empty($primaryPt['middle_name']) ? $primaryPt['middle_name'] . ' ' : '') . ($primaryPt['last_name'] ?? ''));
+            if ($fullName === '' && !empty($primaryPt['full_name'])) {
+                $fullName = (string) $primaryPt['full_name'];
+            }
             $email    = trim((string) ($_POST['email'] ?? ($primaryPt['email'] ?? '')));
             $finalEm  = $email !== '' ? $email : null;
 
             $res = db_create_account([
                 'user_id'        => $userId,
-                'username'       => $fullName,
+                'first_name'     => null,
+                'middle_name'    => null,
+                'last_name'      => null,
                 'email'          => $finalEm,
                 'password'       => $password,
                 'full_name'      => $fullName,
@@ -370,7 +371,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'phone'          => $phone,
                 'phone_verified' => 1,
                 'sex'            => (string) ($primaryPt['sex'] ?? 'Not specified'),
-                'address'        => (string) ($primaryPt['address'] ?? ''),
             ], true);
 
             if (isset($res['error'])) {
@@ -433,6 +433,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = db()->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:em) LIMIT 1');
                 $stmt->execute([':em' => $uid]);
                 $acc = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+                if ($acc) {
+                    $acc['full_name'] = db_format_account_name($acc);
+                }
             }
             if (!$acc) {
                 $_SESSION['set_pw_error'] = 'Account not found for "' . $uid . '".';
@@ -484,7 +487,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
          * ----------------------------------------------------- */
         case 'login':
             $userId     = strtoupper(trim((string) ($_POST['user_id'] ?? '')));
-            $identifier = trim((string) ($_POST['login_identifier'] ?? ($_POST['phone'] ?? ($_POST['email'] ?? ($_POST['username'] ?? '')))));
+            $identifier = trim((string) ($_POST['login_identifier'] ?? ($_POST['phone'] ?? ($_POST['email'] ?? ''))));
             $password   = (string) ($_POST['password'] ?? '');
 
             if (str_contains($identifier, 'Warning') || str_contains($identifier, '<br') || str_contains($identifier, 'Undefined')) {
@@ -654,10 +657,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 redirect('index.php');
             }
 
-            $pdo = db();
-            $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
-            $stmt->execute([':pid' => $targetPid]);
-            if ($pt = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            if ($pt = db_find_patient_by_id($targetPid)) {
                 $_SESSION['active_patient_id']   = (string) $pt['patient_id'];
                 $_SESSION['active_patient_name'] = (string) $pt['full_name'];
                 $_SESSION['active_patient_mrn']  = format_mrn((string) ($pt['mrn'] ?: $pt['patient_id']));
@@ -726,6 +726,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt = $pdo->prepare('SELECT * FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid) AND status != "Archived" LIMIT 1');
             $stmt->execute([':pid' => $patientId]);
             $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($pt) {
+                $pt['full_name'] = trim(($pt['first_name'] ?? '') . (!empty($pt['middle_name']) ? ' ' . $pt['middle_name'] : '') . ' ' . ($pt['last_name'] ?? ''));
+            }
 
             if (!$pt) {
                 $_SESSION[$attemptKey] = $attempts + 1;
@@ -826,6 +829,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $params = array_merge($mrnVariants, $mrnVariants);
             $stmt->execute($params);
             $pt = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($pt) {
+                $pt['full_name'] = trim(($pt['first_name'] ?? '') . (!empty($pt['middle_name']) ? ' ' . $pt['middle_name'] : '') . ' ' . ($pt['last_name'] ?? ''));
+                $pt['address']   = implode(', ', array_filter([$pt['street'] ?? '', $pt['barangay'] ?? '', $pt['city'] ?? '', $pt['province'] ?? '', $pt['country'] ?? '', $pt['postal_code'] ?? '']));
+            }
 
             // Screen 4 Checks (server-side, generic error on any failure):
             // 1. The MRN exists
@@ -1248,6 +1255,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmtPt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
                 $stmtPt->execute([':pid' => strtoupper($activePtId)]);
                 $ptRow = $stmtPt->fetch(PDO::FETCH_ASSOC);
+                if ($ptRow) {
+                    $ptRow['full_name'] = trim(($ptRow['first_name'] ?? '') . (!empty($ptRow['middle_name']) ? ' ' . $ptRow['middle_name'] : '') . ' ' . ($ptRow['last_name'] ?? ''));
+                }
 
                 if (!$ptRow) {
                     flash('Patient record not found.');
@@ -1434,9 +1444,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $addrStr = implode(', ', array_filter([$street, $barangay, $city, $province, $country, $postalCode]));
 
             $pdo = db();
-            $stmtPt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(full_name) = :fn LIMIT 1');
+            $stmtPt = $pdo->prepare("SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(TRIM(COALESCE(first_name,'') || CASE WHEN middle_name IS NOT NULL AND middle_name != '' THEN ' ' || middle_name ELSE '' END || ' ' || COALESCE(last_name,''))) = :fn LIMIT 1");
             $stmtPt->execute([':pid' => strtoupper($targetPt), ':fn' => strtoupper($targetPt)]);
             $ptRow = $stmtPt->fetch(PDO::FETCH_ASSOC);
+            if ($ptRow) {
+                $ptRow['full_name'] = trim(($ptRow['first_name'] ?? '') . (!empty($ptRow['middle_name']) ? ' ' . $ptRow['middle_name'] : '') . ' ' . ($ptRow['last_name'] ?? ''));
+            }
 
             if (!$ptRow) {
                 flash('Patient record not found.');
@@ -2830,6 +2843,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $u[9]  = $license;
                         $u[10] = $birthdate;
                         $u[11] = $phone;
+                        $u['first_name']  = $first;
+                        $u['middle_name'] = $middle;
+                        $u['last_name']   = $last;
                         $u['country']     = $country;
                         $u['province']    = $province;
                         $u['city']        = $city;
@@ -2846,7 +2862,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $created = db_create_account([
                     'user_id'        => $newUserId,
-                    'username'       => $fullName,
+                    'first_name'     => $first,
+                    'middle_name'    => $middle !== '' ? $middle : null,
+                    'last_name'      => $last,
                     'email'          => $email,
                     'password'       => $tempPw,
                     'full_name'      => $fullName,
@@ -2966,7 +2984,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $newVals = [
-                'full_name'      => $fullName,
+                'first_name'     => $first,
+                'middle_name'    => $middle,
+                'last_name'      => $last,
                 'email'          => $email,
                 'phone'          => $phone,
                 'birthdate'      => $birthdate,
@@ -3030,9 +3050,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
             }
 
-            db()->prepare('UPDATE accounts SET full_name = :fn, email = :em, phone = :ph, birthdate = :bd, sex = :sx, department = :dp, specialty = :sp, license_number = :ln, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc WHERE id = :id')
+            db()->prepare('UPDATE accounts SET first_name = :fnm, middle_name = :mnm, last_name = :lnm, email = :em, phone = :ph, birthdate = :bd, sex = :sx, department = :dp, specialty = :sp, license_number = :ln, country = :co, province = :pr, city = :ci, barangay = :bg, street = :st, postal_code = :pc WHERE id = :id')
                 ->execute([
-                    ':fn'   => $fullName,
+                    ':fnm'  => $first !== '' ? $first : null,
+                    ':mnm'  => $middle !== '' ? $middle : null,
+                    ':lnm'  => $last !== '' ? $last : null,
                     ':em'   => $email,
                     ':ph'   => $phone,
                     ':bd'   => $birthdate,
@@ -3068,6 +3090,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = db()->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:em) LIMIT 1');
                 $stmt->execute([':em' => $email]);
                 $acc = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+                if ($acc) {
+                    $acc['full_name'] = db_format_account_name($acc);
+                }
             }
 
             if (!$acc) {
@@ -3140,6 +3165,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $acc = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if ($acc) {
+                $acc['full_name'] = db_format_account_name($acc);
                 $targetRole   = (string) $acc['role'];
                 $targetStatus = (string) $acc['status'];
                 $targetUid    = (string) $acc['user_id'];

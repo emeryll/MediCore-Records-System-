@@ -78,12 +78,12 @@ function db_init_schema(PDO $pdo, string $driver): void
     $pdo->exec("CREATE TABLE IF NOT EXISTS accounts (
         id {$autoInc},
         user_id VARCHAR(20) NOT NULL UNIQUE,
-        username VARCHAR(100) NOT NULL UNIQUE,
+        first_name VARCHAR(80) DEFAULT NULL,
+        middle_name VARCHAR(80) DEFAULT NULL,
+        last_name VARCHAR(80) DEFAULT NULL,
         email VARCHAR(150) DEFAULT NULL,
         password_hash VARCHAR(255) NOT NULL,
-        full_name VARCHAR(150) NOT NULL,
         role VARCHAR(30) NOT NULL,
-        user_role_label VARCHAR(40) NOT NULL DEFAULT 'Patient',
         status VARCHAR(20) NOT NULL DEFAULT 'Active',
         department VARCHAR(100) NOT NULL DEFAULT '',
         specialty VARCHAR(120) NOT NULL DEFAULT '',
@@ -93,10 +93,12 @@ function db_init_schema(PDO $pdo, string $driver): void
         created_at VARCHAR(40) NOT NULL
     )");
     $accountCols = [
+        "first_name VARCHAR(80) DEFAULT NULL",
+        "middle_name VARCHAR(80) DEFAULT NULL",
+        "last_name VARCHAR(80) DEFAULT NULL",
         "birthdate VARCHAR(40) NOT NULL DEFAULT ''",
         "phone VARCHAR(50) NOT NULL DEFAULT ''",
         "phone_verified INT NOT NULL DEFAULT 0",
-        "address TEXT",
         "country VARCHAR(100) NOT NULL DEFAULT 'Philippines'",
         "province VARCHAR(100) NOT NULL DEFAULT ''",
         "city VARCHAR(100) NOT NULL DEFAULT ''",
@@ -116,53 +118,15 @@ function db_init_schema(PDO $pdo, string $driver): void
     try {
         if ($driver === 'mysql') {
             $pdo->exec("ALTER TABLE accounts MODIFY email VARCHAR(150) NULL DEFAULT NULL");
-        } elseif ($driver === 'sqlite') {
-            $cols = $pdo->query("PRAGMA table_info(accounts)")->fetchAll(PDO::FETCH_ASSOC);
-            $emailNotNull = false;
-            foreach ($cols as $c) {
-                if ($c['name'] === 'email' && !empty($c['notnull'])) {
-                    $emailNotNull = true;
-                    break;
-                }
-            }
-            if ($emailNotNull) {
-                $pdo->exec("PRAGMA foreign_keys=OFF");
-                $colNames = array_map(static fn($c) => (string) $c['name'], $cols);
-                $colList = implode(', ', array_map(static fn($n) => '"' . $n . '"', $colNames));
-                $pdo->exec("CREATE TABLE accounts_migrated (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id VARCHAR(20) NOT NULL UNIQUE,
-                    username VARCHAR(100) NOT NULL UNIQUE,
-                    email VARCHAR(150) DEFAULT NULL,
-                    password_hash VARCHAR(255) NOT NULL,
-                    full_name VARCHAR(150) NOT NULL,
-                    role VARCHAR(30) NOT NULL,
-                    user_role_label VARCHAR(40) NOT NULL DEFAULT 'Patient',
-                    status VARCHAR(20) NOT NULL DEFAULT 'Active',
-                    department VARCHAR(100) NOT NULL DEFAULT '',
-                    specialty VARCHAR(120) NOT NULL DEFAULT '',
-                    license_number VARCHAR(60) NOT NULL DEFAULT '',
-                    birthdate VARCHAR(40) NOT NULL DEFAULT '',
-                    last_login VARCHAR(60) NOT NULL DEFAULT 'Never',
-                    created_at VARCHAR(40) NOT NULL,
-                    phone VARCHAR(50) NOT NULL DEFAULT '',
-                    phone_verified INT NOT NULL DEFAULT 0,
-                    address TEXT,
-                    country VARCHAR(100) NOT NULL DEFAULT 'Philippines',
-                    province VARCHAR(100) NOT NULL DEFAULT '',
-                    city VARCHAR(100) NOT NULL DEFAULT '',
-                    barangay VARCHAR(100) NOT NULL DEFAULT '',
-                    street VARCHAR(255) NOT NULL DEFAULT '',
-                    postal_code VARCHAR(30) NOT NULL DEFAULT '',
-                    sex VARCHAR(30) NOT NULL DEFAULT 'Not specified',
-                    force_password_change INT NOT NULL DEFAULT 0,
-                    set_password_token VARCHAR(120) NOT NULL DEFAULT '',
-                    set_password_expires_at BIGINT NOT NULL DEFAULT 0
-                )");
-                $pdo->exec("INSERT INTO accounts_migrated ({$colList}) SELECT {$colList} FROM accounts");
-                $pdo->exec("DROP TABLE accounts");
-                $pdo->exec("ALTER TABLE accounts_migrated RENAME TO accounts");
-                $pdo->exec("PRAGMA foreign_keys=ON");
+            $mCols = array_column($pdo->query("SHOW COLUMNS FROM accounts")->fetchAll(PDO::FETCH_ASSOC), 'Field');
+            if (in_array('full_name', $mCols, true)) {
+                $pdo->exec("UPDATE accounts SET first_name = 'Medea',  middle_name = NULL,      last_name = 'Solon'       WHERE user_id = 'A-0001' AND (first_name IS NULL OR first_name = '')");
+                $pdo->exec("UPDATE accounts SET first_name = 'Meryll', middle_name = 'Silvano', last_name = 'Evangelista' WHERE user_id = 'D-1001' AND (first_name IS NULL OR first_name = '')");
+                $pdo->exec("UPDATE accounts SET first_name = 'Jereme', middle_name = 'Silvano', last_name = 'Evangelista' WHERE user_id = 'S-1001' AND (first_name IS NULL OR first_name = '')");
+                $pdo->exec("UPDATE accounts SET first_name = 'Jae',    middle_name = 'Silvano', last_name = 'Evangelista' WHERE user_id = 'C-1001' AND (first_name IS NULL OR first_name = '')");
+                $pdo->exec("UPDATE accounts SET first_name = 'Mjoy',   middle_name = NULL,      last_name = 'Evangelista' WHERE user_id = 'S-1002' AND (first_name IS NULL OR first_name = '')");
+                $pdo->exec("UPDATE accounts SET first_name = NULL, middle_name = NULL, last_name = NULL WHERE role = 'Patient'");
+                $pdo->exec("ALTER TABLE accounts DROP COLUMN full_name");
             }
         }
     } catch (Throwable) {}
@@ -589,14 +553,14 @@ function db_init_schema(PDO $pdo, string $driver): void
 
     // Auto-link existing patient accounts to their corresponding patient record if not already linked
     try {
-        $pAccs = $pdo->query("SELECT user_id, full_name FROM accounts WHERE role = 'Patient'")->fetchAll(PDO::FETCH_ASSOC);
+        $pAccs = $pdo->query("SELECT user_id FROM accounts WHERE role = 'Patient'")->fetchAll(PDO::FETCH_ASSOC);
         $insLink = $pdo->prepare("INSERT OR IGNORE INTO patient_account_links (account_uid, patient_id, relationship_label, is_primary, linked_at, linked_by)
             VALUES (:auid, :pid, 'Self', 1, :lat, 'System Initial Migration')");
         foreach ($pAccs as $pa) {
             $uId = (string) $pa['user_id'];
             $mrnEquiv = str_replace('P-', 'MRN-', $uId);
-            $pQuery = $pdo->prepare("SELECT patient_id, mrn FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me OR UPPER(first_name || ' ' || last_name) = :fn) AND (registration_status = 'Registered' OR registration_status IS NULL) LIMIT 1");
-            $pQuery->execute([':pid' => strtoupper($uId), ':me' => strtoupper($mrnEquiv), ':fn' => strtoupper((string) $pa['full_name'])]);
+            $pQuery = $pdo->prepare("SELECT patient_id, mrn FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me) AND (registration_status = 'Registered' OR registration_status IS NULL) LIMIT 1");
+            $pQuery->execute([':pid' => strtoupper($uId), ':me' => strtoupper($mrnEquiv)]);
             if ($pRow = $pQuery->fetch(PDO::FETCH_ASSOC)) {
                 $insLink->execute([
                     ':auid'  => $uId,
@@ -645,17 +609,17 @@ function db_migrate_sqlite_to_mysql(PDO $mysql, string $sqlitePath): void
             return;
         }
         $ins = $mysql->prepare('INSERT IGNORE INTO accounts
-            (user_id, username, email, password_hash, full_name, role, user_role_label, status, department, specialty, license_number, last_login, created_at)
-            VALUES (:uid, :un, :em, :pw, :fn, :r, :rl, :st, :dp, :sp, :lc, :ll, :ca)');
+            (user_id, first_name, middle_name, last_name, email, password_hash, role, status, department, specialty, license_number, last_login, created_at)
+            VALUES (:uid, :fnm, :mnm, :lnm, :em, :pw, :r, :st, :dp, :sp, :lc, :ll, :ca)');
         foreach ($accRows as $a) {
             $ins->execute([
                 ':uid' => $a['user_id'],
-                ':un'  => $a['username'],
+                ':fnm' => $a['first_name'] ?? null,
+                ':mnm' => $a['middle_name'] ?? null,
+                ':lnm' => $a['last_name'] ?? null,
                 ':em'  => $a['email'],
                 ':pw'  => $a['password_hash'],
-                ':fn'  => $a['full_name'],
                 ':r'   => $a['role'],
-                ':rl'  => $a['user_role_label'],
                 ':st'  => $a['status'],
                 ':dp'  => $a['department'] ?? '',
                 ':sp'  => $a['specialty'] ?? '',
@@ -940,10 +904,102 @@ function db_get_account_by_email(string $email): ?array
     if ($email === '') {
         return null;
     }
-    $stmt = db()->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:em) LIMIT 1');
+    $pdo  = db();
+    $stmt = $pdo->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:em) LIMIT 1');
     $stmt->execute([':em' => $email]);
     $row = $stmt->fetch();
-    return $row ?: null;
+    if (!$row) {
+        return null;
+    }
+    $row['full_name'] = db_format_account_name($row, $pdo);
+    return $row;
+}
+
+/**
+ * Split a full name string into [first_name, middle_name, last_name] as a fallback when atomic fields are not passed.
+ */
+function db_split_person_name(string $fullName): array
+{
+    $clean = trim(preg_replace('/^(Dr\.|Mr\.|Ms\.|Mrs\.)\s+/i', '', trim($fullName)));
+    if ($clean === '') {
+        return ['first_name' => '', 'middle_name' => null, 'last_name' => ''];
+    }
+    $parts = preg_split('/\s+/', $clean) ?: [];
+    if (count($parts) === 1) {
+        return ['first_name' => $parts[0], 'middle_name' => null, 'last_name' => ''];
+    }
+    if (count($parts) === 2) {
+        return ['first_name' => $parts[0], 'middle_name' => null, 'last_name' => $parts[1]];
+    }
+    $first  = array_shift($parts);
+    $last   = array_pop($parts);
+    $middle = implode(' ', $parts);
+    return ['first_name' => $first, 'middle_name' => $middle !== '' ? $middle : null, 'last_name' => $last];
+}
+
+/**
+ * Build the display name for an account row dynamically from atomic name columns.
+ * - Employees (Admin, Doctor, Staff, Cashier): built from accounts.first_name, middle_name, last_name.
+ * - Patients (role = 'Patient'): built from the linked record in the `patients` table (never stored on `accounts`).
+ */
+function db_format_account_name(array $acc, ?PDO $pdo = null): string
+{
+    $role = (string) ($acc['role'] ?? '');
+    $uid  = strtoupper(trim((string) ($acc['user_id'] ?? '')));
+
+    if ($role !== 'Patient') {
+        $fn = trim((string) ($acc['first_name'] ?? ''));
+        $mn = trim((string) ($acc['middle_name'] ?? ''));
+        $ln = trim((string) ($acc['last_name'] ?? ''));
+        $built = trim($fn . ($mn !== '' ? ' ' . $mn : '') . ($ln !== '' ? ' ' . $ln : ''));
+        if ($built !== '') {
+            return $built;
+        }
+    }
+
+    // For Patient accounts (or fallback), resolve from `patients` table
+    try {
+        $pdo = $pdo ?? db();
+        if ($uid !== '') {
+            $stmt = $pdo->prepare('SELECT p.first_name, p.middle_name, p.last_name
+                FROM patient_account_links l
+                INNER JOIN patients p ON (UPPER(p.patient_id) = UPPER(l.patient_id) OR UPPER(p.mrn) = UPPER(l.patient_id))
+                WHERE UPPER(l.account_uid) = :uid AND (l.unlinked_at IS NULL OR l.unlinked_at = "")
+                ORDER BY l.is_primary DESC, l.id ASC LIMIT 1');
+            $stmt->execute([':uid' => $uid]);
+            if ($pRow = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $pFn = trim((string) ($pRow['first_name'] ?? ''));
+                $pMn = trim((string) ($pRow['middle_name'] ?? ''));
+                $pLn = trim((string) ($pRow['last_name'] ?? ''));
+                $pBuilt = trim($pFn . ($pMn !== '' ? ' ' . $pMn : '') . ($pLn !== '' ? ' ' . $pLn : ''));
+                if ($pBuilt !== '') {
+                    return $pBuilt;
+                }
+            }
+
+            $mrnEquiv = preg_replace('/^P-0*(\d+)$/i', 'MRN-$1', $uid);
+            if (preg_match('/^P-0*(\d+)$/i', $uid, $m)) {
+                $mrnEquiv = 'MRN-' . str_pad($m[1], 4, '0', STR_PAD_LEFT);
+            }
+            $stmt2 = $pdo->prepare('SELECT first_name, middle_name, last_name FROM patients WHERE UPPER(patient_id) = :uid OR UPPER(mrn) = :uid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me LIMIT 1');
+            $stmt2->execute([':uid' => $uid, ':me' => strtoupper((string) $mrnEquiv)]);
+            if ($pRow2 = $stmt2->fetch(PDO::FETCH_ASSOC)) {
+                $pFn = trim((string) ($pRow2['first_name'] ?? ''));
+                $pMn = trim((string) ($pRow2['middle_name'] ?? ''));
+                $pLn = trim((string) ($pRow2['last_name'] ?? ''));
+                $pBuilt = trim($pFn . ($pMn !== '' ? ' ' . $pMn : '') . ($pLn !== '' ? ' ' . $pLn : ''));
+                if ($pBuilt !== '') {
+                    return $pBuilt;
+                }
+            }
+        }
+    } catch (Throwable) {}
+
+    $fn = trim((string) ($acc['first_name'] ?? ''));
+    $mn = trim((string) ($acc['middle_name'] ?? ''));
+    $ln = trim((string) ($acc['last_name'] ?? ''));
+    $fallback = trim($fn . ($mn !== '' ? ' ' . $mn : '') . ($ln !== '' ? ' ' . $ln : ''));
+    return $fallback !== '' ? $fallback : ($uid !== '' ? $uid : 'User');
 }
 
 /**
@@ -955,11 +1011,24 @@ function db_create_account(array $input, bool $fromAdmin = false): array
 {
     $pdo       = db();
     $userId    = strtoupper(trim((string) ($input['user_id'] ?? '')));
-    $username  = strtolower(trim((string) ($input['username'] ?? '')));
     $rawEmail  = isset($input['email']) && $input['email'] !== null ? trim((string) $input['email']) : '';
     $email     = $rawEmail !== '' ? strtolower($rawEmail) : null;
     $password  = (string) ($input['password'] ?? '');
+    $firstName = trim((string) ($input['first_name'] ?? ''));
+    $midRaw    = isset($input['middle_name']) && $input['middle_name'] !== null ? trim((string) $input['middle_name']) : '';
+    $lastName  = trim((string) ($input['last_name'] ?? ''));
     $fullName  = trim((string) ($input['full_name'] ?? ''));
+    if ($firstName === '' && $lastName === '' && $fullName !== '') {
+        $split     = db_split_person_name($fullName);
+        $firstName = $split['first_name'];
+        $midRaw    = (string) ($split['middle_name'] ?? '');
+        $lastName  = $split['last_name'];
+    }
+    $middleName = $midRaw !== '' ? $midRaw : null;
+    if ($fullName === '' && ($firstName !== '' || $lastName !== '')) {
+        $fullName = trim($firstName . ($middleName !== null ? ' ' . $middleName : '') . ($lastName !== '' ? ' ' . $lastName : ''));
+    }
+
     $dept      = trim((string) ($input['department'] ?? ''));
     $spec      = trim((string) ($input['specialty'] ?? ''));
     $license   = trim((string) ($input['license'] ?? ''));
@@ -999,9 +1068,6 @@ function db_create_account(array $input, bool $fromAdmin = false): array
         'P' => 'Patient',
     };
 
-    if ($username === '') {
-        $username = $fullName !== '' ? $fullName : $userId;
-    }
     if ($email === null || $email === '') {
         if ($prefix !== 'P' && $role !== 'Patient') {
             $email = strtolower($userId) . '@medicore.local';
@@ -1019,15 +1085,21 @@ function db_create_account(array $input, bool $fromAdmin = false): array
     $street        = trim((string) ($input['street'] ?? ''));
     $postalCode    = trim((string) ($input['postal_code'] ?? ''));
     $sex           = trim((string) ($input['sex'] ?? 'Not specified'));
-    $address       = trim((string) ($input['address'] ?? ''));
-    if ($address === '' && ($street !== '' || $city !== '')) {
-        $addrParts = array_filter([$street, $barangay, $city, $province, $country, $postalCode]);
-        $address   = implode(', ', $addrParts);
+
+    // Rule 2: Patient names live ONLY in the patients table. Never copy them into accounts.
+    if ($role === 'Patient') {
+        $dbFirstName  = null;
+        $dbMiddleName = null;
+        $dbLastName   = null;
+    } else {
+        if ($firstName === '' || $lastName === '') {
+            return ['error' => 'Please enter first name and last name.'];
+        }
+        $dbFirstName  = $firstName;
+        $dbMiddleName = $middleName;
+        $dbLastName   = $lastName;
     }
 
-    if ($fullName === '') {
-        return ['error' => 'Please enter full name.'];
-    }
     if ($prefix === 'P' && $birthdate === '') {
         return ['error' => 'Please enter the patient\'s birthday (date of birth).'];
     }
@@ -1046,22 +1118,11 @@ function db_create_account(array $input, bool $fromAdmin = false): array
         }
     }
 
-    // Check if username or email is already taken
+    // Check if email is already taken
     if ($email !== null && $email !== '') {
-        $chkUser = $pdo->prepare('SELECT id, username, email FROM accounts WHERE LOWER(username) = :u OR (email IS NOT NULL AND email != "" AND LOWER(email) = :e) LIMIT 1');
-        $chkUser->execute([':u' => strtolower($username), ':e' => strtolower($email)]);
-    } else {
-        $chkUser = $pdo->prepare('SELECT id, username, email FROM accounts WHERE LOWER(username) = :u LIMIT 1');
-        $chkUser->execute([':u' => strtolower($username)]);
-    }
-    if ($existing = $chkUser->fetch()) {
-        if (strtolower((string) $existing['username']) === strtolower($username)) {
-            if ($prefix === 'P') {
-                $username = $username . ' (' . $userId . ')';
-            } else {
-                return ['error' => 'Username "' . $username . '" is already taken.'];
-            }
-        } elseif ($email !== null && strtolower((string) ($existing['email'] ?? '')) === strtolower($email)) {
+        $chkUser = $pdo->prepare('SELECT id, email FROM accounts WHERE email IS NOT NULL AND email != "" AND LOWER(email) = :e LIMIT 1');
+        $chkUser->execute([':e' => strtolower($email)]);
+        if ($existing = $chkUser->fetch()) {
             return ['error' => 'Email "' . $email . '" is already registered.'];
         }
     }
@@ -1070,14 +1131,15 @@ function db_create_account(array $input, bool $fromAdmin = false): array
     $now  = date('M d, Y · H:i');
 
     $ins = $pdo->prepare('INSERT INTO accounts
-        (user_id, username, email, password_hash, full_name, role, status, department, specialty, license_number, birthdate, phone, phone_verified, country, province, city, barangay, street, postal_code, sex, last_login, created_at)
-        VALUES (:uid, :uname, :email, :hash, :fname, :role, :status, :dept, :spec, :lic, :bdate, :ph, :pv, :co, :pr, :ci, :bg, :st, :pc, :sx, :llogin, :cat)');
+        (user_id, first_name, middle_name, last_name, email, password_hash, role, status, department, specialty, license_number, birthdate, phone, phone_verified, country, province, city, barangay, street, postal_code, sex, last_login, created_at)
+        VALUES (:uid, :fnm, :mnm, :lnm, :email, :hash, :role, :status, :dept, :spec, :lic, :bdate, :ph, :pv, :co, :pr, :ci, :bg, :st, :pc, :sx, :llogin, :cat)');
     $ins->execute([
         ':uid'    => $userId,
-        ':uname'  => $username,
+        ':fnm'    => $dbFirstName,
+        ':mnm'    => $dbMiddleName,
+        ':lnm'    => $dbLastName,
         ':email'  => $email,
         ':hash'   => $hash,
-        ':fname'  => $fullName,
         ':role'   => $role,
         ':status' => $status,
         ':dept'   => $dept,
@@ -1101,13 +1163,19 @@ function db_create_account(array $input, bool $fromAdmin = false): array
         db_set_store('admin_id_claimed', '1');
     }
 
+    $displayFullName = $role === 'Patient'
+        ? ($fullName !== '' ? $fullName : db_format_account_name(['user_id' => $userId, 'role' => 'Patient'], $pdo))
+        : trim($firstName . ($middleName !== null ? ' ' . $middleName : '') . ($lastName !== '' ? ' ' . $lastName : ''));
+
     return [
         'ok'      => true,
         'account' => [
             'user_id'         => $userId,
-            'username'        => $username,
+            'first_name'      => $dbFirstName,
+            'middle_name'     => $dbMiddleName,
+            'last_name'       => $dbLastName,
             'email'           => $email,
-            'full_name'       => $fullName,
+            'full_name'       => $displayFullName,
             'role'            => $role,
             'user_role_label' => $roleLabel,
             'status'          => $status,
@@ -1212,7 +1280,7 @@ function db_next_provisional_ref(): string
 
 /**
  * Verify credentials against the database `accounts` table.
- * One login page for all roles: supports Mobile Number or Email (or User ID / MRN) + Password.
+ * Rule 1: Login uses phone number OR email plus password only. No username or user ID login.
  */
 function db_verify_login(string $userId, string $identifier, string $password): array
 {
@@ -1231,37 +1299,13 @@ function db_verify_login(string $userId, string $identifier, string $password): 
     $matchesInput = function(array $acc, string $input) use ($pdo): bool {
         $clean = trim($input);
         if ($clean === '') return false;
-        $upper = strtoupper($clean);
-        $accId = strtoupper(trim((string)($acc['user_id'] ?? '')));
 
-        if ($accId === $upper || str_replace('-', '', $accId) === str_replace('-', '', $upper)) {
-            return true;
-        }
-
-        if (preg_match('/^(MRN|[ASDPC])-?0*(\d+)$/i', $clean, $m) && preg_match('/^(MRN|[ASDPC])-?0*(\d+)$/i', $accId, $am)) {
-            $p1 = strtoupper($m[1]) === 'MRN' ? 'P' : strtoupper($m[1]);
-            $p2 = strtoupper($am[1]) === 'MRN' ? 'P' : strtoupper($am[1]);
-            if ($p1 === $p2 && (int)$m[2] === (int)$am[2]) {
-                return true;
-            }
-        }
-
-        if (($upper === 'ADMIN' || $upper === 'ADMINISTRATOR') && ($acc['role'] === 'Admin' || $accId === 'A-0001')) {
-            return true;
-        }
-
-        if (!empty($acc['username']) && strcasecmp($clean, (string)$acc['username']) === 0) {
-            return true;
-        }
-
-        if (!empty($acc['full_name']) && (strcasecmp($clean, (string)$acc['full_name']) === 0 || str_contains(strtolower((string)$acc['full_name']), strtolower($clean)))) {
-            return true;
-        }
-
+        // Email match
         if (str_contains($clean, '@') && !empty($acc['email']) && strcasecmp($clean, (string)$acc['email']) === 0) {
             return true;
         }
 
+        // Phone number match
         $digitsIn = preg_replace('/[^0-9]/', '', $clean);
         if (strlen($digitsIn) >= 7) {
             $accPhone = preg_replace('/[^0-9]/', '', (string)($acc['phone'] ?? ''));
@@ -1270,7 +1314,7 @@ function db_verify_login(string $userId, string $identifier, string $password): 
                     return true;
                 }
             }
-            if ($acc['role'] === 'Patient') {
+            if (($acc['role'] ?? '') === 'Patient') {
                 $pStmt = $pdo->prepare('SELECT phone FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
                 $pStmt->execute([':pid' => $acc['user_id']]);
                 if ($pRow = $pStmt->fetch(PDO::FETCH_ASSOC)) {
@@ -1286,19 +1330,10 @@ function db_verify_login(string $userId, string $identifier, string $password): 
     };
 
     $finalCandidates = [];
-    if ($rawUserId !== '' && $rawIdentifier !== '' && strcasecmp($rawUserId, $rawIdentifier) !== 0) {
-        foreach ($allAccounts as $acc) {
-            if ($matchesInput($acc, $rawUserId) && ($acc['role'] === 'Admin' || $matchesInput($acc, $rawIdentifier))) {
-                $finalCandidates[] = $acc;
-            }
-        }
-    }
-    if (empty($finalCandidates)) {
-        $lookup = $rawIdentifier !== '' ? $rawIdentifier : $rawUserId;
-        foreach ($allAccounts as $acc) {
-            if ($matchesInput($acc, $lookup)) {
-                $finalCandidates[] = $acc;
-            }
+    $lookup = $rawIdentifier !== '' ? $rawIdentifier : $rawUserId;
+    foreach ($allAccounts as $acc) {
+        if ($matchesInput($acc, $lookup)) {
+            $finalCandidates[] = $acc;
         }
     }
 
@@ -1346,6 +1381,7 @@ function db_verify_login(string $userId, string $identifier, string $password): 
             $up = $pdo->prepare('UPDATE accounts SET last_login = :ll WHERE id = :id');
             $up->execute([':ll' => $now, ':id' => $acc['id']]);
             $acc['last_login'] = $now;
+            $acc['full_name']  = db_format_account_name($acc, $pdo);
             return ['ok' => true, 'account' => $acc];
         }
     }
@@ -1358,7 +1394,7 @@ function db_update_user_account(
     string $origIdentifier,
     string $fullName,
     string $email,
-    string $username,
+    string $unusedLegacyParam,
     string $uRoleLabel,
     string $status,
     string $dept,
@@ -1373,7 +1409,10 @@ function db_update_user_account(
     string $barangay = '',
     string $street = '',
     string $postalCode = '',
-    string $sex = 'Not specified'
+    string $sex = 'Not specified',
+    ?string $firstName = null,
+    ?string $middleName = null,
+    ?string $lastName = null
 ): array {
     $pdo  = db();
     $stmt = $pdo->prepare('SELECT * FROM accounts WHERE UPPER(user_id) = UPPER(:orig) OR LOWER(email) = LOWER(:orig) OR LOWER(email) = LOWER(:em) LIMIT 1');
@@ -1383,9 +1422,6 @@ function db_update_user_account(
         return ['error' => 'User account not found in database.'];
     }
 
-    if ($username === '') {
-        $username = $fullName !== '' ? $fullName : (string) $acc['user_id'];
-    }
     if ($email === '') {
         $email = (string) ($acc['email'] ?: strtolower((string) $acc['user_id']) . '@medicore.local');
     }
@@ -1409,6 +1445,23 @@ function db_update_user_account(
         $currentUserId = db_next_user_id($expectedPrefix);
     }
 
+    if ($role === 'Patient') {
+        $dbFn = null;
+        $dbMn = null;
+        $dbLn = null;
+    } else {
+        if ($firstName !== null || $lastName !== null) {
+            $dbFn = trim((string) $firstName);
+            $dbMn = ($middleName !== null && trim($middleName) !== '') ? trim($middleName) : null;
+            $dbLn = trim((string) $lastName);
+        } else {
+            $split = db_split_person_name($fullName);
+            $dbFn  = $split['first_name'];
+            $dbMn  = $split['middle_name'];
+            $dbLn  = $split['last_name'];
+        }
+    }
+
     $fmtBdate = $birthdate !== '' && function_exists('format_birthdate')
         ? format_birthdate($birthdate)
         : (string) ($acc['birthdate'] ?? '');
@@ -1416,14 +1469,12 @@ function db_update_user_account(
         $fmtBdate = '';
     }
 
-    $addrParts = array_filter([$street, $barangay, $city, $province, $country, $postalCode]);
-    $formattedAddr = implode(', ', $addrParts) ?: (string) ($acc['address'] ?? '');
-
-    $sql = 'UPDATE accounts SET user_id = :uid, full_name = :fn, username = :un, email = :em, role = :r, status = :st, department = :dp, specialty = :sp, license_number = :lc, birthdate = :bd, phone = :ph, country = :co, province = :pr, city = :ci, barangay = :bg, street = :stt, postal_code = :pc, sex = :sx';
+    $sql = 'UPDATE accounts SET user_id = :uid, first_name = :fnm, middle_name = :mnm, last_name = :lnm, email = :em, role = :r, status = :st, department = :dp, specialty = :sp, license_number = :lc, birthdate = :bd, phone = :ph, country = :co, province = :pr, city = :ci, barangay = :bg, street = :stt, postal_code = :pc, sex = :sx';
     $params = [
         ':uid'  => $currentUserId,
-        ':fn'   => $fullName,
-        ':un'   => $username,
+        ':fnm'  => $dbFn,
+        ':mnm'  => $dbMn,
+        ':lnm'  => $dbLn,
         ':em'   => $email,
         ':r'    => $role,
         ':st'   => $status,
@@ -1475,11 +1526,12 @@ function db_archive_user_account(string $email, string $archivedBy): ?array
     if (!$acc) {
         return null;
     }
+    $accName = db_format_account_name($acc, $pdo);
     $del = $pdo->prepare('DELETE FROM accounts WHERE id = :id');
     $del->execute([':id' => $acc['id']]);
 
     return db_archive_record(
-        $acc['full_name'] . ' (' . $acc['user_id'] . ')',
+        $accName . ' (' . $acc['user_id'] . ')',
         'User account',
         $archivedBy,
         ['kind' => 'user_account', 'data' => $acc]
@@ -1527,8 +1579,13 @@ function db_delete_patient(string $patientId, string $archivedBy = 'Staff'): ?ar
     $stmtAcc->execute([':pid' => $pid]);
     $acc = $stmtAcc->fetch(PDO::FETCH_ASSOC);
 
+    $ptFullName = trim(($pt['first_name'] ?? '') . ' ' . (!empty($pt['middle_name']) ? $pt['middle_name'] . ' ' : '') . ($pt['last_name'] ?? ''));
+    if ($ptFullName === '') {
+        $ptFullName = $pid;
+    }
+
     // Archive record
-    $arcRow = db_archive_record($pt['full_name'] . ' (' . $pid . ')', 'Patient', $archivedBy, [
+    $arcRow = db_archive_record($ptFullName . ' (' . $pid . ')', 'Patient', $archivedBy, [
         'kind'    => 'patient',
         'data'    => $pt,
         'account' => $acc ?: null,
@@ -1598,17 +1655,32 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
     $data = $payload['data'] ?? null;
 
     if ($kind === 'user_account' && is_array($data)) {
+        $role = (string) ($data['role'] ?? 'Staff');
+        $fnm  = $data['first_name'] ?? null;
+        $mnm  = $data['middle_name'] ?? null;
+        $lnm  = $data['last_name'] ?? null;
+        if ($role === 'Patient') {
+            $fnm = null;
+            $mnm = null;
+            $lnm = null;
+        } elseif ($fnm === null && !empty($data['full_name'])) {
+            $sp  = db_split_person_name((string) $data['full_name']);
+            $fnm = $sp['first_name'];
+            $mnm = $sp['middle_name'];
+            $lnm = $sp['last_name'];
+        }
         $ins = $pdo->prepare('INSERT INTO accounts
-            (user_id, username, email, password_hash, full_name, role, status, department, specialty, license_number, last_login, created_at)
-            VALUES (:uid, :un, :em, :pw, :fn, :r, :st, :dp, :sp, :lc, :ll, :ca)');
+            (user_id, first_name, middle_name, last_name, email, password_hash, role, status, department, specialty, license_number, last_login, created_at)
+            VALUES (:uid, :fnm, :mnm, :lnm, :em, :pw, :r, :st, :dp, :sp, :lc, :ll, :ca)');
         try {
             $ins->execute([
                 ':uid' => $data['user_id'],
-                ':un'  => $data['username'],
+                ':fnm' => $fnm,
+                ':mnm' => $mnm,
+                ':lnm' => $lnm,
                 ':em'  => $data['email'],
                 ':pw'  => $data['password_hash'],
-                ':fn'  => $data['full_name'],
-                ':r'   => $data['role'],
+                ':r'   => $role,
                 ':st'  => $data['status'] ?? 'Active',
                 ':dp'  => $data['department'] ?? '',
                 ':sp'  => $data['specialty'] ?? '',
@@ -1616,16 +1688,23 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
                 ':ll'  => $data['last_login'] ?? 'Never',
                 ':ca'  => $data['created_at'] ?? date('M d, Y · H:i'),
             ]);
+            $dispName = db_format_account_name([
+                'user_id'     => $data['user_id'],
+                'role'        => $role,
+                'first_name'  => $fnm,
+                'middle_name' => $mnm,
+                'last_name'   => $lnm,
+            ], $pdo);
             array_unshift($state['users'], [
-                $data['full_name'],
+                $dispName,
                 $data['email'],
-                $data['user_role_label'],
+                $role,
                 $data['status'] ?? 'Active',
                 $data['last_login'] ?? 'Never',
                 $data['department'] ?? '',
                 $data['specialty'] ?? '',
                 $data['user_id'],
-                $data['username'],
+                '—',
                 $data['license_number'] ?? '',
             ]);
         } catch (Throwable) {
@@ -1684,14 +1763,12 @@ function db_restore_archive_record(string $archiveCode, array &$state): ?array
             ]);
             if (!empty($payload['account']) && is_array($payload['account'])) {
                 $accData = $payload['account'];
-                $insAcc = $pdo->prepare('INSERT INTO accounts (user_id, username, email, password_hash, full_name, role, status, department, specialty, license_number, last_login, created_at) VALUES (:uid, :un, :em, :pw, :fn, :r, :st, :dp, :sp, :lc, :ll, :ca)');
+                $insAcc = $pdo->prepare('INSERT INTO accounts (user_id, first_name, middle_name, last_name, email, password_hash, role, status, department, specialty, license_number, last_login, created_at) VALUES (:uid, NULL, NULL, NULL, :em, :pw, :r, :st, :dp, :sp, :lc, :ll, :ca)');
                 try {
                     $insAcc->execute([
                         ':uid' => $accData['user_id'],
-                        ':un'  => $accData['username'],
                         ':em'  => $accData['email'],
                         ':pw'  => $accData['password_hash'],
-                        ':fn'  => $accData['full_name'],
                         ':r'   => $accData['role'],
                         ':st'  => $accData['status'] ?? 'Active',
                         ':dp'  => $accData['department'] ?? '',
@@ -1769,8 +1846,9 @@ function db_load_state(): array
             $u['postal_code'] ?? '',
         ], fn($v) => trim((string)$v) !== '' && trim((string)$v) !== '—');
         $uAddr = !empty($uAddrParts) ? implode(', ', $uAddrParts) : '—';
+        $uDispName = db_format_account_name($u, $pdo);
         $users[] = [
-            $u['full_name'],
+            $uDispName,
             $u['email'],
             $roleLabel,
             $u['status'],
@@ -1778,9 +1856,12 @@ function db_load_state(): array
             $u['department'],
             $u['specialty'],
             $u['user_id'],
-            $u['username'],
+            $uAddr,
             $u['license_number'],
             $u['birthdate'] ?? '',
+            'first_name'             => $u['first_name'] ?? '',
+            'middle_name'            => $u['middle_name'] ?? '',
+            'last_name'              => $u['last_name'] ?? '',
             'phone'                  => $u['phone'] ?? '',
             'phone_verified'         => (int) ($u['phone_verified'] ?? 0),
             'address'                => $uAddr,
@@ -1982,85 +2063,10 @@ function db_load_state(): array
         }
     }
 
-    // Ensure all patients referenced in appointments, admissions, or medical records ALWAYS reflect in $patients
-    try {
-        $apptRows = $pdo->query('SELECT patient_name, patient_id FROM appointments WHERE patient_name IS NOT NULL AND patient_name != "" AND patient_name != "—"')->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($apptRows as $ap) {
-            $aName = trim((string) ($ap['patient_name'] ?? ''));
-            $aPid  = trim((string) ($ap['patient_id'] ?? ''));
-            if ($aName === '' || $aName === '—') {
-                continue;
-            }
-            $found = false;
-            foreach ($patients as $pt) {
-                if (strcasecmp((string) $pt[0], $aName) === 0
-                    || ($aPid !== '' && strcasecmp((string) ($pt[8] ?? ''), $aPid) === 0)
-                    || ($aPid !== '' && strcasecmp((string) ($pt['mrn'] ?? ''), $aPid) === 0)) {
-                    $found = true;
-                    break;
-                }
-            }
-            if (!$found) {
-                $userMatch = null;
-                foreach ($users as $u) {
-                    if (strcasecmp((string) $u[0], $aName) === 0) {
-                        $userMatch = $u;
-                        break;
-                    }
-                }
-                $isProv = str_starts_with(strtoupper($aPid), 'PROV-') || ($userMatch === null && !str_starts_with(strtoupper($aPid), 'MRN-') && !str_starts_with(strtoupper($aPid), 'P-'));
-                $mrn    = $isProv ? '' : ($aPid !== '' ? (str_starts_with(strtoupper($aPid), 'MRN-') ? $aPid : 'MRN-' . preg_replace('/[^0-9]/', '', $aPid)) : db_next_mrn());
-                $pid    = $aPid !== '' ? $aPid : ($isProv ? db_next_provisional_ref() : str_replace('MRN-', 'P-', $mrn));
-                $newPt  = [
-                    $aName,
-                    '—',
-                    '—',
-                    '—',
-                    function_exists('initials') ? initials($aName, 2) : 'PT',
-                    'Not specified',
-                    'Not specified',
-                    $isProv ? '— (Provisional phone-in record)' : '—',
-                    $pid,
-                    9                     => $mrn,
-                    10                    => $isProv ? 'Provisional' : 'Registered',
-                    11                    => date('Y-m-d'),
-                    'mrn'                 => $mrn,
-                    'registration_status' => $isProv ? 'Provisional' : 'Registered',
-                    'reg_status'          => $isProv ? 'Provisional' : 'Registered',
-                    'patient_id'          => $pid,
-                    'phone_verified'      => $isProv ? 0 : 1,
-                    'status'              => 'Active',
-                    'created_by'          => 'Staff',
-                    'created_at'          => date('Y-m-d H:i:s'),
-                ];
-                $patients[] = $newPt;
-                // Also insert into database table so it is permanently stored
-                try {
-                    $pdo->prepare('INSERT INTO patients (patient_id, mrn, registration_status, full_name, birthdate, phone, insurance_no, avatar, sex, blood_type, address, status, created_by, created_at) VALUES (:pid, :mrn, :reg, :fn, :bd, :ph, :in, :av, :sx, :bt, :ad, :st, :cb, :ca)')
-                        ->execute([
-                            ':pid' => $pid,
-                            ':mrn' => $mrn,
-                            ':reg' => $isProv ? 'Provisional' : 'Registered',
-                            ':fn'  => $aName,
-                            ':bd'  => '—',
-                            ':ph'  => '—',
-                            ':in'  => '—',
-                            ':av'  => function_exists('initials') ? initials($aName, 2) : 'PT',
-                            ':sx'  => 'Not specified',
-                            ':bt'  => 'Not specified',
-                            ':ad'  => $isProv ? '— (Provisional phone-in record)' : '—',
-                            ':st'  => 'Active',
-                            ':cb'  => 'Staff',
-                            ':ca'  => date('Y-m-d H:i:s'),
-                        ]);
-                } catch (Throwable) {}
-            }
-        }
-    } catch (Throwable) {}
-
     // 3. CRUD: departments, rooms, beds, price_list, doctor_schedules
     $departments = [];
-    $deptStmt = $pdo->query('SELECT d.*, u.full_name as head_doc_fn,
+    $deptStmt = $pdo->query('SELECT d.*,
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as head_doc_fn,
         (SELECT COUNT(*) FROM accounts a WHERE LOWER(a.department) = LOWER(d.name) AND a.status = "Active") as active_staff_count
         FROM departments d
         LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(d.head_doctor_id)
@@ -2150,7 +2156,7 @@ function db_load_state(): array
     $appointments = [];
     $apptStmt = $pdo->query('SELECT a.*,
         p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
-        u.full_name as d_fn
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as d_fn
         FROM appointments a
         LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(a.patient_id) OR UPPER(p.mrn) = UPPER(a.patient_id))
         LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(a.doctor_id)
@@ -2183,7 +2189,7 @@ function db_load_state(): array
     $admStmt = $pdo->query('SELECT ad.*,
         p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
         rm.ward as r_ward,
-        u.full_name as d_fn
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as d_fn
         FROM admissions ad
         LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(ad.mrn) OR UPPER(p.mrn) = UPPER(ad.mrn))
         LEFT JOIN rooms rm ON UPPER(rm.room_number) = UPPER(ad.room_number)
@@ -2253,7 +2259,7 @@ function db_load_state(): array
     $dcStmt = $pdo->query('SELECT dc.*,
         p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
         rm.ward as r_ward,
-        u.full_name as d_fn
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as d_fn
         FROM discharges dc
         LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(dc.mrn) OR UPPER(p.mrn) = UPPER(dc.mrn))
         LEFT JOIN rooms rm ON UPPER(rm.room_number) = UPPER(dc.room_number)
@@ -2338,7 +2344,7 @@ function db_load_state(): array
     $pyStmt = $pdo->query('SELECT py.*,
         b.patient_id,
         p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
-        u.full_name as c_fn
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as c_fn
         FROM payments py
         LEFT JOIN bills b ON UPPER(b.bill_no) = UPPER(py.bill_no)
         LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(b.patient_id) OR UPPER(p.mrn) = UPPER(b.patient_id))
@@ -2389,7 +2395,7 @@ function db_load_state(): array
     $records = [];
     $mrStmt = $pdo->query('SELECT mr.*,
         p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
-        u.full_name as d_fn
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as d_fn
         FROM medical_records mr
         LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(mr.patient_id) OR UPPER(p.mrn) = UPPER(mr.patient_id))
         LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(mr.doctor_id)
@@ -2424,7 +2430,7 @@ function db_load_state(): array
     $labResults = [];
     $lrStmt = $pdo->query('SELECT lr.*,
         p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
-        u.full_name as d_fn
+        TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as d_fn
         FROM lab_results lr
         LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(lr.patient_id) OR UPPER(p.mrn) = UPPER(lr.patient_id))
         LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(lr.doctor_id)
@@ -2458,7 +2464,7 @@ function db_load_state(): array
     try {
         $rxStmt = $pdo->query('SELECT rx.*,
             p.first_name as p_fn, p.middle_name as p_mn, p.last_name as p_ln,
-            u.full_name as d_fn
+            TRIM(COALESCE(u.first_name, "") || " " || (CASE WHEN u.middle_name IS NOT NULL AND u.middle_name != "" THEN u.middle_name || " " ELSE "" END) || COALESCE(u.last_name, "")) as d_fn
             FROM prescriptions rx
             LEFT JOIN patients p ON (UPPER(p.patient_id) = UPPER(rx.patient_id) OR UPPER(p.mrn) = UPPER(rx.patient_id))
             LEFT JOIN accounts u ON UPPER(u.user_id) = UPPER(rx.doctor_id)
@@ -2591,7 +2597,12 @@ function db_resolve_doctor_id_by_name(PDO $pdo, ?string $docName): ?string
         return null;
     }
     $clean = trim(preg_replace('/^Dr\.\s*/i', '', (string)$docName));
-    $stmt = $pdo->prepare('SELECT user_id FROM accounts WHERE role = "Doctor" AND (UPPER(full_name) = UPPER(:n1) OR UPPER(full_name) = UPPER(:n2)) LIMIT 1');
+    $stmt = $pdo->prepare('SELECT user_id FROM accounts WHERE role = "Doctor" AND (
+        UPPER(TRIM(COALESCE(first_name, "") || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || COALESCE(last_name, ""))) = UPPER(:n1)
+        OR UPPER(TRIM(COALESCE(first_name, "") || " " || COALESCE(last_name, ""))) = UPPER(:n1)
+        OR UPPER(TRIM(COALESCE(first_name, "") || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || COALESCE(last_name, ""))) = UPPER(:n2)
+        OR UPPER(user_id) = UPPER(:n1)
+    ) LIMIT 1');
     $stmt->execute([':n1' => $clean, ':n2' => $docName]);
     $uid = $stmt->fetchColumn();
     return $uid ?: null;
@@ -2603,8 +2614,13 @@ function db_resolve_cashier_id_by_name(PDO $pdo, ?string $cashierName): ?string
     if (empty($cashierName) || $cashierName === '—') {
         return null;
     }
-    $stmt = $pdo->prepare('SELECT user_id FROM accounts WHERE role = "Cashier" AND UPPER(full_name) = UPPER(:n) LIMIT 1');
-    $stmt->execute([':n' => trim((string)$cashierName)]);
+    $clean = trim((string)$cashierName);
+    $stmt = $pdo->prepare('SELECT user_id FROM accounts WHERE role = "Cashier" AND (
+        UPPER(TRIM(COALESCE(first_name, "") || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || COALESCE(last_name, ""))) = UPPER(:n)
+        OR UPPER(TRIM(COALESCE(first_name, "") || " " || COALESCE(last_name, ""))) = UPPER(:n)
+        OR UPPER(user_id) = UPPER(:n)
+    ) LIMIT 1');
+    $stmt->execute([':n' => $clean]);
     $uid = $stmt->fetchColumn();
     return $uid ?: null;
 }
@@ -3000,7 +3016,7 @@ function db_save_state(array $state): void
 }
 
 /**
- * Find account by user_id (e.g. S-1001, D-1001, C-1001, A-0001, P-1001, or admin).
+ * Find account by user_id (e.g. S-1001, D-1001, C-1001, A-0001, P-1001, or email).
  */
 function db_find_account_by_id(string $userId): ?array
 {
@@ -3010,10 +3026,11 @@ function db_find_account_by_id(string $userId): ?array
         return null;
     }
 
-    $formatAccRow = static function (?array $row): ?array {
+    $formatAccRow = static function (?array $row) use ($pdo): ?array {
         if (!$row) {
             return null;
         }
+        $row['full_name'] = db_format_account_name($row, $pdo);
         if (!isset($row['address'])) {
             $uParts = array_filter([$row['street'] ?? '', $row['barangay'] ?? '', $row['city'] ?? '', $row['province'] ?? '', $row['country'] ?? ''], fn($x) => trim((string)$x) !== '');
             $row['address'] = !empty($uParts) ? implode(', ', $uParts) : '—';
@@ -3045,12 +3062,6 @@ function db_find_account_by_id(string $userId): ?array
         }
     }
 
-    $stmt = $pdo->prepare('SELECT * FROM accounts WHERE LOWER(username) = LOWER(:u) LIMIT 1');
-    $stmt->execute([':u' => trim($userId)]);
-    if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        return $formatAccRow($row);
-    }
-
     if (str_contains($userId, '@')) {
         $stmt = $pdo->prepare('SELECT * FROM accounts WHERE LOWER(email) = LOWER(:e) LIMIT 1');
         $stmt->execute([':e' => strtolower(trim($userId))]);
@@ -3079,15 +3090,16 @@ function db_find_account_by_phone(string $phone): ?array
         ':p10' => '%' . $last10,
     ]);
     if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $row['full_name'] = db_format_account_name($row, $pdo);
         return $row;
     }
     // Also check session state if present
     foreach ($_SESSION['state']['users'] ?? [] as $u) {
-        $uPh = preg_replace('/[^0-9]/', '', (string) ($u[11] ?? ($u[1] ?? '')));
+        $uPh = preg_replace('/[^0-9]/', '', (string) ($u['phone'] ?? ($u[11] ?? '')));
         if ($uPh !== '' && ($uPh === $clean || substr($uPh, -10) === $last10)) {
             return [
                 'user_id'   => $u[7] ?? '',
-                'username'  => $u[1] ?? '',
+                'email'     => $u[1] ?? '',
                 'full_name' => $u[0] ?? '',
                 'role'      => $u[2] ?? 'Patient',
                 'status'    => $u[3] ?? 'Active',
@@ -3125,13 +3137,13 @@ function db_get_account_linked_patients(string $accountUid): array
     // If no links found but the account is a primary Patient account, auto-link to their self record
     if (empty($links)) {
         try {
-            $accStmt = $pdo->prepare('SELECT role, full_name FROM accounts WHERE UPPER(user_id) = :auid LIMIT 1');
+            $accStmt = $pdo->prepare('SELECT role, phone FROM accounts WHERE UPPER(user_id) = :auid LIMIT 1');
             $accStmt->execute([':auid' => $auid]);
             $accRow = $accStmt->fetch(PDO::FETCH_ASSOC);
             if ($accRow && $accRow['role'] === 'Patient') {
                 $mrnEquiv = str_replace('P-', 'MRN-', $auid);
-                $pQuery = $pdo->prepare('SELECT *, TRIM(first_name || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || last_name) AS full_name FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me OR UPPER(TRIM(first_name || " " || last_name)) = :fn) AND no_phone = 0 AND (registration_status = "Registered" OR registration_status IS NULL) AND (status IS NULL OR status != "Archived") LIMIT 1');
-                $pQuery->execute([':pid' => $auid, ':me' => $mrnEquiv, ':fn' => strtoupper((string) $accRow['full_name'])]);
+                $pQuery = $pdo->prepare('SELECT *, TRIM(first_name || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || last_name) AS full_name FROM patients WHERE (UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(patient_id) = :me OR UPPER(mrn) = :me) AND no_phone = 0 AND (registration_status = "Registered" OR registration_status IS NULL) AND (status IS NULL OR status != "Archived") LIMIT 1');
+                $pQuery->execute([':pid' => $auid, ':me' => $mrnEquiv]);
                 if ($pt = $pQuery->fetch(PDO::FETCH_ASSOC)) {
                     db_link_patient_to_account($auid, $pt['patient_id'], 'Self', true, 'Self-Service');
                     $stmt->execute([':auid' => $auid]);
@@ -3314,6 +3326,9 @@ function db_get_registered_patients_by_phone(string $phone): array
 
     $out = [];
     foreach ($rows as $r) {
+        $r['full_name'] = trim(($r['first_name'] ?? '') . ' ' . (!empty($r['middle_name']) ? $r['middle_name'] . ' ' : '') . ($r['last_name'] ?? ''));
+        $addrParts = array_filter([$r['street'] ?? '', $r['barangay'] ?? '', $r['city'] ?? '', $r['province'] ?? '', $r['country'] ?? ''], fn($x) => trim((string)$x) !== '');
+        $r['address'] = !empty($addrParts) ? implode(', ', $addrParts) : '—';
         $pid    = strtoupper(trim((string) ($r['patient_id'] ?? '')));
         $mrn    = strtoupper(trim((string) ($r['mrn'] ?? '')));
         $regSt  = (string) ($r['registration_status'] ?? '');
@@ -3602,7 +3617,13 @@ function db_is_patient_conflict_of_interest(string $userId, string $patientIdOrM
     // Also check patient record by ID, MRN, or Full Name against linked patients and user full name
     try {
         $pdo = db();
-        $pStmt = $pdo->prepare('SELECT full_name, patient_id, mrn FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid OR UPPER(full_name) = :pid LIMIT 1');
+        $pStmt = $pdo->prepare('SELECT TRIM(first_name || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || last_name) AS full_name, patient_id, mrn
+            FROM patients
+            WHERE UPPER(patient_id) = :pid
+               OR UPPER(mrn) = :pid
+               OR UPPER(TRIM(first_name || " " || (CASE WHEN middle_name IS NOT NULL AND middle_name != "" THEN middle_name || " " ELSE "" END) || last_name)) = :pid
+               OR UPPER(TRIM(first_name || " " || last_name)) = :pid
+            LIMIT 1');
         $pStmt->execute([':pid' => $target]);
         $pt = $pStmt->fetch(PDO::FETCH_ASSOC);
         if ($pt) {

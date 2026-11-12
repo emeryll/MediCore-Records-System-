@@ -50,8 +50,8 @@ if ($modal === 'Edit user' || $isUserDetail) {
     if ($targetUid !== '' && function_exists('db_find_account_by_id')) {
         $userAcc = db_find_account_by_id($targetUid);
     }
-    if (!$userAcc && $targetEmail !== '' && function_exists('db_find_account_by_email')) {
-        $userAcc = db_find_account_by_email($targetEmail);
+    if (!$userAcc && $targetEmail !== '' && function_exists('db_get_account_by_email')) {
+        $userAcc = db_get_account_by_email($targetEmail);
     }
     foreach ($state['users'] as $us) {
         if (($targetEmail !== '' && strcasecmp((string) $us[1], $targetEmail) === 0)
@@ -1460,9 +1460,10 @@ $subtitle = match (true) {
 
             <?php elseif ($isUser): ?>
                 <?php
-                $nameParts   = explode(' ', (string) ($userRow[0] ?? ''), 2);
-                $uFirst      = $nameParts[0] ?? '';
-                $uLast       = $nameParts[1] ?? '';
+                $nameSplit   = function_exists('db_split_person_name') ? db_split_person_name((string) ($userRow[0] ?? '')) : ['first_name' => '', 'middle_name' => null, 'last_name' => ''];
+                $uFirst      = (string) ($userAcc['first_name'] ?? ($userRow['first_name'] ?? ($nameSplit['first_name'] ?? '')));
+                $uMiddle     = (string) ($userAcc['middle_name'] ?? ($userRow['middle_name'] ?? ($nameSplit['middle_name'] ?? '')));
+                $uLast       = (string) ($userAcc['last_name'] ?? ($userRow['last_name'] ?? ($nameSplit['last_name'] ?? '')));
                 $currentRole = (string) ($_GET['role'] ?? ($userRow[2] ?? 'Doctor'));
                 $uPhone      = (string) ($userRow[11] ?? ($userRow['phone'] ?? ''));
                 $uDob        = (string) ($userRow[10] ?? '');
@@ -1490,7 +1491,7 @@ $subtitle = match (true) {
                 </div>
                 <div class="form-grid three-col">
                     <?= field('First name *', 'first_name', 'First name', 'text', $uFirst, ['required' => true]) ?>
-                    <?= field('Middle name', 'middle_name', 'Optional', 'text', '') ?>
+                    <?= field('Middle name', 'middle_name', 'Optional', 'text', $uMiddle) ?>
                     <?= field('Last name *', 'last_name', 'Last name', 'text', $uLast, ['required' => true]) ?>
                 </div>
                 <div class="form-grid three-col">

@@ -6,6 +6,17 @@ $pdo        = db();
 $stmt       = $pdo->prepare('SELECT * FROM accounts WHERE UPPER(user_id) = :uid LIMIT 1');
 $stmt->execute([':uid' => strtoupper($currentUid)]);
 $acc = $stmt->fetch(PDO::FETCH_ASSOC);
+if ($acc) {
+    $acc['full_name'] = db_format_account_name($acc, $pdo);
+    $acc['address']   = implode(', ', array_filter([
+        $acc['street'] ?? '',
+        $acc['barangay'] ?? '',
+        $acc['city'] ?? '',
+        $acc['province'] ?? '',
+        $acc['country'] ?? '',
+        $acc['postal_code'] ?? '',
+    ])) ?: '—';
+}
 
 $ptRec = null;
 if ($role === 'Patient') {
@@ -14,6 +25,17 @@ if ($role === 'Patient') {
         $stmtPt = $pdo->prepare('SELECT * FROM patients WHERE UPPER(patient_id) = :pid OR UPPER(mrn) = :pid LIMIT 1');
         $stmtPt->execute([':pid' => strtoupper($activePtId)]);
         $ptRec = $stmtPt->fetch(PDO::FETCH_ASSOC);
+        if ($ptRec) {
+            $ptRec['full_name'] = trim(($ptRec['first_name'] ?? '') . (!empty($ptRec['middle_name']) ? ' ' . $ptRec['middle_name'] : '') . ' ' . ($ptRec['last_name'] ?? ''));
+            $ptRec['address']   = implode(', ', array_filter([
+                $ptRec['street'] ?? '',
+                $ptRec['barangay'] ?? '',
+                $ptRec['city'] ?? '',
+                $ptRec['province'] ?? '',
+                $ptRec['country'] ?? '',
+                $ptRec['postal_code'] ?? '',
+            ])) ?: '—';
+        }
     }
     if (!$ptRec) {
         $idInfo = resolve_patient_identity($state, current_user_name('Patient'), $currentUid);

@@ -19,10 +19,11 @@ $tempPw = bin2hex(random_bytes(16));
 echo "[1] Creating Staff account ({$newUserId} / {$testEmail})...\n";
 $created = db_create_account([
     'user_id'        => $newUserId,
-    'username'       => 'Test Employee Staff',
+    'first_name'     => 'Test',
+    'middle_name'    => 'Employee',
+    'last_name'      => 'Staff',
     'email'          => $testEmail,
     'password'       => $tempPw,
-    'full_name'      => 'Test Employee Staff',
     'role'           => 'Staff',
     'status'         => 'Pending',
     'department'     => '',

@@ -24,9 +24,9 @@ All existing data was preserved without loss or duplication. Historical snapshot
 Below is the side-by-side comparison for each changed table, along with a plain-language explanation of the problem prevented.
 
 ### 1. `accounts` (User Accounts)
-* **BEFORE (Columns):** `id`, `user_id`, `username`, `password_hash`, `email`, `role`, `user_role_label`, `status`, `last_login`, `full_name`, `department`, `specialty`, `license_number`, `birthdate`, `phone`, `avatar`, `created_at`, `force_password_change`, `set_password_token`, `set_password_expires_at`, `country`, `province`, `city`, `barangay`, `street`, `postal_code`, `sex`, `phone_verified`, `address`
-* **AFTER (Columns):** `id`, `user_id`, `username`, `password_hash`, `email`, `role`, `status`, `last_login`, `full_name`, `department`, `specialty`, `license_number`, `birthdate`, `phone`, `avatar`, `created_at`, `force_password_change`, `set_password_token`, `set_password_expires_at`, `country`, `province`, `city`, `barangay`, `street`, `postal_code`, `sex`, `phone_verified`
-* **WHAT FOR:** Dropped `address` and `user_role_label` because they duplicated information already stored in the specific address components and role tables, preventing out-of-sync address text and conflicting role labels.
+* **BEFORE (Columns):** `id`, `user_id`, `password_hash`, `email`, `role`, `user_role_label`, `status`, `last_login`, `full_name`, `department`, `specialty`, `license_number`, `birthdate`, `phone`, `avatar`, `created_at`, `force_password_change`, `set_password_token`, `set_password_expires_at`, `country`, `province`, `city`, `barangay`, `street`, `postal_code`, `sex`, `phone_verified`, `address`
+* **AFTER (Columns):** `id`, `user_id`, `first_name`, `middle_name`, `last_name`, `password_hash`, `email`, `role`, `status`, `last_login`, `department`, `specialty`, `license_number`, `birthdate`, `phone`, `avatar`, `created_at`, `force_password_change`, `set_password_token`, `set_password_expires_at`, `country`, `province`, `city`, `barangay`, `street`, `postal_code`, `sex`, `phone_verified`
+* **WHAT FOR:** Replaced composite `full_name` with atomic `first_name`, `middle_name`, `last_name` for employee accounts (leaving patient names exclusively in `patients`), and dropped `address` and `user_role_label` because they duplicated information already stored in the specific address components and role tables.
 
 ---
 
@@ -180,7 +180,7 @@ erDiagram
 ```
 
 ### Complete Schema Summary:
-1. **`accounts`**: `PK(id)`, Unique(`user_id`, `email`, `username`)
+1. **`accounts`**: `PK(id)`, Unique(`user_id`, `email`)
 2. **`user_roles`**: `PK(id)`, Unique(`user_id`, `role`), `FK(user_id -> accounts.user_id)`
 3. **`patients`**: `PK(id)`, Unique(`patient_id`, `mrn`)
 4. **`patient_account_links`**: `PK(id)`, Unique(`account_uid`, `patient_id`), `FK(account_uid -> accounts.user_id)`, `FK(patient_id -> patients.patient_id)`

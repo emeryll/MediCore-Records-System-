@@ -15,14 +15,23 @@ function archive_get_admins(): array
     $pdo = db();
     $stmt = $pdo->query('SELECT * FROM accounts WHERE role = "Admin" ORDER BY id ASC');
     $admins = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    foreach ($admins as &$a) {
+        $a['full_name'] = function_exists('db_format_account_name')
+            ? db_format_account_name($a, $pdo)
+            : trim(($a['first_name'] ?? '') . (!empty($a['middle_name']) ? ' ' . $a['middle_name'] : '') . ' ' . ($a['last_name'] ?? ''));
+    }
+    unset($a);
     if (!$admins) {
         $admins = [[
-            'id'        => 1,
-            'user_id'   => 'A-0001',
-            'full_name' => 'Solon Medea',
-            'email'     => 'solonmedea582@gmail.com',
-            'role'      => 'Admin',
-            'status'    => 'Active',
+            'id'          => 1,
+            'user_id'     => 'A-0001',
+            'first_name'  => 'Medea',
+            'middle_name' => null,
+            'last_name'   => 'Solon',
+            'full_name'   => 'Medea Solon',
+            'email'       => 'solonmedea582@gmail.com',
+            'role'        => 'Admin',
+            'status'      => 'Active',
         ]];
     }
     return $admins;
